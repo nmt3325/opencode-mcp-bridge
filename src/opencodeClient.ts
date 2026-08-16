@@ -168,6 +168,18 @@ export function extractSessionStatus(data: unknown, sessionId: string): string |
 	return undefined
 }
 
+/**
+ * True when a response body really parsed as JSON. Guards against opencode builds
+ * that answer unknown paths with the web UI (an HTML document) and HTTP 200,
+ * which would otherwise look like a working v2 endpoint.
+ */
+export function isJsonPayload(response: { data: unknown; text: string }): boolean {
+	if (response.data === null || response.data === undefined) return false
+	if (typeof response.data !== "object") return false
+	if (response.text.trimStart().startsWith("<")) return false
+	return true
+}
+
 export class OpencodeClient {
 	private readonly config: BridgeConfig
 	private caps: Capabilities | null = null
@@ -252,7 +264,9 @@ export class OpencodeClient {
 		try {
 			const shell = await this.request("GET", "/api/shell", { timeoutMs: 5_000 })
 			caps.reachable = true
-			if (shell.status !== 404 && shell.status !== 501) caps.shellApi = "v2"
+			// A 200 alone is not enough: several builds serve the web UI for unknown
+			// paths, so the v2 shell API only counts when the body really is JSON.
+			if (shell.status !== 404 && shell.status !== 501 && isJsonPayload(shell)) caps.shellApi = "v2"
 		} catch (error) {
 			caps.error = (error as Error).message
 		}
@@ -420,15 +434,16 @@ export class OpencodeClient {
 				body: { command: input.command, timeout, cwd: directory },
 				query: { directory },
 			})
-			if (response.ok) {
+			if (response.ok && isJsonPayload(response)) {
 				const record = asRecord(response.data)
 				const id = firstString(record, ["id", "shellID", "shellId"]) ?? firstString(asRecord(record?.shell), ["id"])
-				if (!id) throw new OpencodeError("shell id missing in response", response.status, response.text)
-				return { id, api: "v2", status: firstString(record, ["status"]) ?? "running" }
+				if (id) return { id, api: "v2", status: firstString(record, ["status"]) ?? "running" }
 			}
-			if (response.status !== 404 && response.status !== 501) {
+			if (!response.ok && response.status !== 404 && response.status !== 501) {
 				throw new OpencodeError("POST /api/shell failed (HTTP " + response.status + ")", response.status, response.text)
 			}
+			// Reachable, but the answer was not a shell job (404, 501, or the web UI):
+			// remember that this build has no usable v2 shell API and use the legacy route.
 			if (this.caps) this.caps.shellApi = "legacy"
 		}
 		return this.shellStartLegacy({ ...input, directory, timeoutSeconds: timeout })

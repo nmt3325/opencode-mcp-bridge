@@ -158,18 +158,34 @@ stdio:
 npm test     # test/e2e.sh
 ```
 
-`test/mock-opencode.mjs`（依存ゼロのモック opencode）を起動し、**curl だけで MCP over HTTP を叩いて** 44 項目を検証します。
+`test/mock-opencode.mjs`（依存ゼロのモック opencode）を起動し、**curl だけで MCP over HTTP を叩いて** 49 項目を検証します。
 
 - v2 API 構成: initialize / tools/list / 各ツール / permission 承認フロー / セッション無し時 400 応答
 - `--legacy` 構成: `/api/shell` と `prompt_async` を 404 にして、旧 API への自動フォールバックを検証
+- `--html-spa` / `--spa-post` 構成: `/api/shell` が Web UI の HTML を 200 で返すビルドでも誤検出しないことを検証（下記の実機バグの回帰テスト）
 
 ```text
 ===================================
- passed: 44   failed: 0
+ passed: 49   failed: 0
 ===================================
 ```
 
 実物の opencode に対する疎通確認は `bash test/smoke-real.sh`（`opencode serve` が起動している必要あり）。
+
+## 実機検証で見つかったバグと修正
+
+モックだけでなく実際の `opencode serve` に繋いだところ、次の不具合を検出して修正しました。
+
+- **現象**: 一部のビルドは未定義のパスに対して Web UI の HTML を **HTTP 200** で返す。そのため `GET /api/shell` が 200 になり、ブリッジが「v2 シェル API あり」と誤検知 → シェル実行が `shell id missing in response` で失敗した。
+- **修正**: 能力検出をステータスコードだけでなく **ボディが本当に JSON か**（`isJsonPayload`）で判定するように変更。さらに `POST /api/shell` が JSON でない応答を返した場合も実行時に legacy ルートへ自動ダウングレードするようにした。
+- **回帰テスト**: モックに `--html-spa` / `--spa-post` モードを追加し、両ケースを e2e に組み込み。
+
+修正後の実機実行結果（`bash test/smoke-real.sh`）:
+
+```json
+{ "ok": true, "capabilities": { "reachable": true, "shellApi": "legacy", "promptAsync": true, "sessionStatusEndpoint": true, "vcsBase": "/api/vcs" } }
+{ "ok": true, "shell_id": "local-90c75649", "api": "legacy", "status": "completed", "exit_code": 0, "output": "real-opencode-ok\nLinux\n" }
+```
 
 ## ライセンス
 

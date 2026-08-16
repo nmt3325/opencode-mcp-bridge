@@ -22,6 +22,9 @@ const flag = (name, fallback) => {
 	return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback
 }
 const LEGACY = argv.includes("--legacy")
+// builds that answer /api/shell with the web UI instead of JSON
+const HTML_SPA = argv.includes("--html-spa")
+const SPA_POST = argv.includes("--spa-post")
 const PORT = Number(flag("--port", "4599"))
 const ROOT = flag("--root", process.cwd())
 const PASSWORD = process.env.MOCK_OPENCODE_PASSWORD ?? ""
@@ -242,6 +245,11 @@ const server = createServer((req, res) => {
 		// --------------------------------------------------------------- shell
 		if (path.startsWith("/api/shell")) {
 			if (LEGACY) return notFound(res)
+			if (HTML_SPA || (SPA_POST && method === "POST")) {
+				res.writeHead(200, { "content-type": "text/html" })
+				res.end("<!doctype html><html><head><title>OpenCode</title></head><body>web ui</body></html>")
+				return
+			}
 			if (path === "/api/shell" && method === "GET") {
 				json(res, 200, [...shells.values()].map(publicShell))
 				return

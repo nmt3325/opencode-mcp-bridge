@@ -246,6 +246,25 @@ check "legacy: wait works without /session/status" '.finished == true' "$LWAIT"
 check "legacy: answer returned" '[.messages[].text] | join(" ") | test("done: delay=1500")' "$LWAIT"
 
 echo
+echo "=== stack 3: build that serves the web UI (HTML) on /api/shell ==="
+start_stack 4601 8802 "--html-spa"
+handshake "http://127.0.0.1:8802"
+check "spa: handshake" '.result.serverInfo.name == "opencode-mcp-bridge"' "$INIT_RESPONSE"
+SHEALTH=$(call_tool opencode_health '{}' | payload)
+check "spa: HTML 200 is not mistaken for the v2 shell API" '.capabilities.shellApi == "legacy"' "$SHEALTH"
+SSPA=$(call_tool opencode_shell '{"command":"echo hello-spa","wait_seconds":8}' | payload)
+check "spa: shell still works over the legacy route" '.api == "legacy" and (.output | test("hello-spa"))' "$SSPA"
+
+echo
+echo "=== stack 4: GET /api/shell looks like v2 but POST answers HTML ==="
+start_stack 4602 8803 "--spa-post"
+handshake "http://127.0.0.1:8803"
+PHEALTH=$(call_tool opencode_health '{}' | payload)
+check "spa-post: probe reports v2" '.capabilities.shellApi == "v2"' "$PHEALTH"
+PSPA=$(call_tool opencode_shell '{"command":"echo hello-downgrade","wait_seconds":8}' | payload)
+check "spa-post: runtime downgrade instead of an error" '.api == "legacy" and (.output | test("hello-downgrade"))' "$PSPA"
+
+echo
 echo "==================================="
 echo " passed: $PASS   failed: $FAIL"
 echo "==================================="
