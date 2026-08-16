@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "opencode-http": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Authorization": "Bearer replace-with-OPENCODE_MCP_TOKEN" }
+    },
+    "opencode-stdio": {
+      "command": "node",
+      "args": ["/opt/opencode-mcp-bridge/dist/index.js", "--stdio"],
+      "env": {
+        "OPENCODE_BASE_URL": "http://127.0.0.1:4096",
+        "OPENCODE_MCP_DEFAULT_DIRECTORY": "/home/user/project"
+      }
+    }
+  }
+}

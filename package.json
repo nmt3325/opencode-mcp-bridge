@@ -1,0 +1,27 @@
+{
+  "name": "opencode-mcp-bridge",
+  "version": "0.1.0",
+  "description": "Timeout-safe MCP bridge for an opencode server: async sessions, async shell jobs, files, VCS diff and permission approvals as MCP tools",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": { "opencode-mcp-bridge": "dist/index.js" },
+  "engines": { "node": ">=20" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js --stdio",
+    "start:http": "node dist/index.js --http",
+    "mock": "node test/mock-opencode.mjs",
+    "test": "bash test/e2e.sh"
+  },
+  "keywords": ["mcp", "opencode", "coding-agent", "model-context-protocol"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=opencode MCP bridge
+After=network-online.target opencode.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode
+WorkingDirectory=/opt/opencode-mcp-bridge
+Environment=OPENCODE_BASE_URL=http://127.0.0.1:4096
+Environment=OPENCODE_MCP_HOST=127.0.0.1
+Environment=OPENCODE_MCP_PORT=8787
+# EnvironmentFile can hold OPENCODE_MCP_TOKEN and OPENCODE_SERVER_PASSWORD
+EnvironmentFile=-/etc/default/opencode-mcp-bridge
+ExecStart=/usr/bin/node /opt/opencode-mcp-bridge/dist/index.js --http
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
