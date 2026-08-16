@@ -22,7 +22,9 @@ export interface RawResponse {
 export interface Capabilities {
 	baseUrl: string
 	reachable: boolean
-	shellApi: "v2" | "legacy"
+	shellApi: "v2" | "legacy" | "pty"
+	/** True when this build exposes /api/pty, the only shell route free of a model. */
+	ptyApi: boolean
 	promptAsync: boolean
 	sessionStatusEndpoint: boolean
 	vcsBase: string | null
@@ -48,6 +50,54 @@ export interface LocalJob {
 	startedAt: number
 	finishedAt?: number
 	error?: string
+}
+
+/**
+ * A command started through opencode's PTY API. Unlike the legacy route this
+ * never involves a model: opencode spawns a real terminal, streams its bytes
+ * over a WebSocket and reports the process exit code.
+ */
+export interface PtyJob {
+	id: string
+	command: string
+	status: "running" | "completed" | "failed" | "killed"
+	output: string
+	exitCode: number | null
+	startedAt: number
+	finishedAt?: number
+	error?: string
+	truncated: boolean
+	killRequested: boolean
+	socket: MinimalSocket | null
+	timeoutTimer?: NodeJS.Timeout
+}
+
+/**
+ * The slice of the WebSocket API the bridge actually uses, declared locally so
+ * this file still compiles against the Node types alone, with no DOM lib.
+ */
+export interface MinimalSocket {
+	binaryType: string
+	onmessage: ((event: { data: unknown }) => void) | null
+	onerror: ((event: unknown) => void) | null
+	onclose: ((event: unknown) => void) | null
+	close: () => void
+}
+
+type SocketConstructor = new (url: string, options?: unknown) => MinimalSocket
+
+/** Node exposes a global WebSocket from 22 onwards; 20 does not. */
+export function socketConstructor(): SocketConstructor | null {
+	const candidate = (globalThis as { WebSocket?: unknown }).WebSocket
+	return typeof candidate === "function" ? (candidate as SocketConstructor) : null
+}
+
+const TERMINAL_NOISE =
+	/\u001B\[[0-9;?]*[ -\/]*[@-~]|\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|\u001B[@-Z\\-_]|[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g
+
+/** Terminals speak escape sequences and CRLF; MCP clients want plain text. */
+export function stripTerminalNoise(chunk: string): string {
+	return chunk.replace(TERMINAL_NOISE, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n")
 }
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
@@ -187,6 +237,7 @@ export class OpencodeClient {
 	private sessionStatusSupported = true
 	private readonly jobs = new Map<string, LocalJob>()
 	private shellSessionId: string | null = null
+	private readonly ptys = new Map<string, PtyJob>()
 
 	constructor(config: BridgeConfig) {
 		this.config = config
@@ -256,6 +307,7 @@ export class OpencodeClient {
 			baseUrl: this.config.baseUrl,
 			reachable: false,
 			shellApi: "legacy",
+			ptyApi: false,
 			promptAsync: this.promptAsyncSupported,
 			sessionStatusEndpoint: false,
 			vcsBase: null,
@@ -270,6 +322,21 @@ export class OpencodeClient {
 		} catch (error) {
 			caps.error = (error as Error).message
 		}
+		// The pty route is the only shell that never goes through a model, so it
+		// wins whenever the build has one and a WebSocket exists to read it.
+		if (socketConstructor()) {
+			try {
+				const pty = await this.request("GET", "/api/pty", { timeoutMs: 5_000 })
+				if (pty.ok && isJsonPayload(pty) && Array.isArray(asRecord(pty.data)?.data)) {
+					caps.reachable = true
+					caps.ptyApi = true
+					if (this.config.shellBackend === "auto" || this.config.shellBackend === "pty") caps.shellApi = "pty"
+				}
+			} catch {
+				// leave ptyApi false and keep whatever the /api/shell probe decided
+			}
+		}
+		if (this.config.shellBackend === "legacy") caps.shellApi = "legacy"
 		if (!caps.reachable) {
 			try {
 				const session = await this.request("GET", "/session", { timeoutMs: 5_000 })
@@ -425,10 +492,19 @@ export class OpencodeClient {
 		timeoutSeconds?: number
 		agent?: string
 		model?: string
-	}): Promise<{ id: string; api: "v2" | "legacy"; status: string }> {
+	}): Promise<{ id: string; api: "v2" | "legacy" | "pty"; status: string }> {
 		const caps = await this.capabilities()
 		const directory = input.directory ?? this.config.defaultDirectory
 		const timeout = input.timeoutSeconds ?? this.config.shellDefaultTimeoutSeconds
+		if (caps.shellApi === "pty") {
+			try {
+				return await this.shellStartPty({ command: input.command, directory, timeoutSeconds: timeout })
+			} catch {
+				// A build that advertises /api/pty but will not start one is not worth
+				// retrying on every call: remember that and use the older routes.
+				if (this.caps) this.caps.shellApi = "legacy"
+			}
+		}
 		if (caps.shellApi === "v2") {
 			const response = await this.request("POST", "/api/shell", {
 				body: { command: input.command, timeout, cwd: directory },
@@ -497,7 +573,150 @@ export class OpencodeClient {
 		return { id: job.id, api: "legacy", status: "running" }
 	}
 
+	// --------------------------------------------------------------- pty shell
+
+	private ptySocketUrl(ptyId: string): string {
+		const url = new URL(this.config.baseUrl + "/api/pty/" + encodeURIComponent(ptyId) + "/connect")
+		url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+		return url.toString()
+	}
+
+	/** Attach to the terminal stream. opencode replays its scrollback on connect. */
+	private attachPtySocket(job: PtyJob): void {
+		const Socket = socketConstructor()
+		if (!Socket) {
+			job.error = "this Node build has no global WebSocket, so pty output cannot be read"
+			return
+		}
+		const url = this.ptySocketUrl(job.id)
+		let socket: MinimalSocket
+		try {
+			// Undici takes headers as a non-standard option; builds that do not are
+			// fine as long as the opencode server needs no credentials.
+			socket = new Socket(url, { headers: this.headers() })
+		} catch {
+			socket = new Socket(url)
+		}
+		socket.binaryType = "arraybuffer"
+		job.socket = socket
+		socket.onmessage = (event) => {
+			// Text frames carry terminal output. Binary frames are control messages:
+			// a NUL byte followed by JSON such as {"cursor":9}.
+			if (typeof event.data === "string") this.appendPtyOutput(job, event.data)
+		}
+		socket.onerror = () => {
+			if (job.status === "running" && !job.error) job.error = "pty websocket error"
+		}
+		socket.onclose = () => {
+			job.socket = null
+			void this.refreshPty(job).catch(() => undefined)
+		}
+	}
+
+	private appendPtyOutput(job: PtyJob, chunk: string): void {
+		const cleaned = stripTerminalNoise(chunk)
+		if (cleaned === "") return
+		const room = this.config.ptyBufferChars - job.output.length
+		if (room <= 0) {
+			job.truncated = true
+			return
+		}
+		job.output += cleaned.length > room ? cleaned.slice(0, room) : cleaned
+		if (cleaned.length > room) job.truncated = true
+	}
+
+	/** Ask opencode whether the terminal is still alive and pick up its exit code. */
+	private async refreshPty(job: PtyJob): Promise<PtyJob> {
+		if (job.status !== "running") return job
+		const response = await this.request("GET", "/api/pty/" + encodeURIComponent(job.id))
+		if (response.status === 404) {
+			job.status = job.killRequested ? "killed" : "completed"
+			job.finishedAt = job.finishedAt ?? Date.now()
+			if (job.timeoutTimer) clearTimeout(job.timeoutTimer)
+			return job
+		}
+		const data = asRecord(asRecord(response.data)?.data)
+		const exitCode = firstNumber(data, ["exitCode", "exit", "code"])
+		if (exitCode !== undefined) job.exitCode = exitCode
+		const status = firstString(data, ["status", "state"])
+		if (status !== undefined && status !== "running" && status !== "starting") {
+			job.status = job.killRequested ? "killed" : (job.exitCode ?? 0) === 0 ? "completed" : "failed"
+			job.finishedAt = job.finishedAt ?? Date.now()
+			if (job.timeoutTimer) clearTimeout(job.timeoutTimer)
+		}
+		return job
+	}
+
+	private armPtyTimeout(job: PtyJob, timeoutSeconds: number): NodeJS.Timeout {
+		const timer = setTimeout(() => {
+			if (job.status !== "running") return
+			job.error = "timed out after " + timeoutSeconds + "s"
+			void this.shellKill(job.id).catch(() => undefined)
+		}, Math.max(timeoutSeconds, 1) * 1_000)
+		timer.unref()
+		return timer
+	}
+
+	private async shellStartPty(input: { command: string; directory?: string; timeoutSeconds: number }): Promise<{
+		id: string
+		api: "pty"
+		status: string
+	}> {
+		const directory = input.directory ?? this.config.defaultDirectory
+		const response = await this.request("POST", "/api/pty", {
+			body: {
+				command: this.config.ptyShell,
+				args: ["-c", input.command],
+				cwd: directory,
+				title: "opencode-mcp-bridge",
+				// A dumb terminal keeps colour codes and cursor games out of output
+				// that an MCP client has to read as plain text.
+				env: { TERM: "dumb" },
+			},
+			query: directory ? { directory } : undefined,
+		})
+		if (!response.ok || !isJsonPayload(response)) {
+			throw new OpencodeError("POST /api/pty failed (HTTP " + response.status + ")", response.status, response.text)
+		}
+		const id = firstString(asRecord(asRecord(response.data)?.data), ["id"])
+		if (!id) throw new OpencodeError("pty id missing in /api/pty response", response.status, response.text)
+		const job: PtyJob = {
+			id,
+			command: input.command,
+			status: "running",
+			output: "",
+			exitCode: null,
+			startedAt: Date.now(),
+			truncated: false,
+			killRequested: false,
+			socket: null,
+		}
+		this.ptys.set(id, job)
+		this.attachPtySocket(job)
+		job.timeoutTimer = this.armPtyTimeout(job, input.timeoutSeconds)
+		return { id, api: "pty", status: "running" }
+	}
+
+	private ptyRecord(job: PtyJob): Record<string, unknown> {
+		return {
+			id: job.id,
+			api: "pty",
+			command: job.command,
+			status: job.status,
+			exitCode: job.exitCode,
+			running: job.status === "running",
+			startedAt: new Date(job.startedAt).toISOString(),
+			finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+			error: job.error ?? null,
+			bufferedChars: job.output.length,
+			truncated: job.truncated,
+			streaming: job.socket !== null,
+		}
+	}
+
 	async shellStatus(id: string): Promise<Record<string, unknown>> {
+		const pty = this.ptys.get(id)
+		if (pty) return this.ptyRecord(await this.refreshPty(pty))
 		const job = this.jobs.get(id)
 		if (job) {
 			return {
@@ -530,6 +749,19 @@ export class OpencodeClient {
 	}
 
 	async shellOutput(id: string, cursor = 0): Promise<{ chunk: string; nextCursor: number; status: string; exitCode: number | null; truncated: boolean }> {
+		const pty = this.ptys.get(id)
+		if (pty) {
+			await this.refreshPty(pty)
+			const pending = pty.output.slice(cursor)
+			const chunk = pending.slice(0, this.config.maxOutputChars)
+			return {
+				chunk,
+				nextCursor: cursor + chunk.length,
+				status: pty.status,
+				exitCode: pty.exitCode,
+				truncated: pty.truncated || chunk.length < pending.length,
+			}
+		}
 		const job = this.jobs.get(id)
 		if (job) {
 			const chunk = job.output.slice(cursor)
@@ -565,6 +797,15 @@ export class OpencodeClient {
 	}
 
 	async shellExtend(id: string, timeoutSeconds: number): Promise<Record<string, unknown>> {
+		const pty = this.ptys.get(id)
+		if (pty) {
+			if (pty.status !== "running") throw new OpencodeError("pty " + id + " is no longer running", 400)
+			// A pty has no server side deadline: the only clock is the bridge's own
+			// timer, so extending means rearming it.
+			if (pty.timeoutTimer) clearTimeout(pty.timeoutTimer)
+			pty.timeoutTimer = this.armPtyTimeout(pty, timeoutSeconds)
+			return { id, api: "pty", status: pty.status, timeoutSeconds }
+		}
 		if (this.jobs.has(id)) {
 			throw new OpencodeError("legacy shell jobs cannot be extended; the request timeout was fixed at start time", 400)
 		}
@@ -575,6 +816,26 @@ export class OpencodeClient {
 	}
 
 	async shellKill(id: string): Promise<Record<string, unknown>> {
+		const pty = this.ptys.get(id)
+		if (pty) {
+			pty.killRequested = true
+			if (pty.timeoutTimer) clearTimeout(pty.timeoutTimer)
+			const response = await this.request("DELETE", "/api/pty/" + encodeURIComponent(id))
+			if (!response.ok && response.status !== 404) {
+				throw new OpencodeError("pty kill failed (HTTP " + response.status + ")", response.status, response.text)
+			}
+			if (pty.status === "running") {
+				pty.status = "killed"
+				pty.finishedAt = Date.now()
+			}
+			try {
+				pty.socket?.close()
+			} catch {
+				// the stream is already gone, which is what we wanted
+			}
+			pty.socket = null
+			return { id, api: "pty", status: pty.status, exitCode: pty.exitCode }
+		}
 		const job = this.jobs.get(id)
 		if (job) {
 			job.status = "killed"
@@ -597,7 +858,31 @@ export class OpencodeClient {
 			status: job.status,
 		}))
 		const caps = await this.capabilities()
-		if (caps.shellApi !== "v2") return local
+		const tracked = [...this.ptys.values()].map((job) => ({
+			id: job.id,
+			api: "pty",
+			command: job.command,
+			status: job.status,
+			exitCode: job.exitCode,
+		}))
+		if (caps.ptyApi) {
+			const response = await this.request("GET", "/api/pty")
+			if (!response.ok || !isJsonPayload(response)) return [...tracked, ...local]
+			const remote = toArray(asRecord(response.data)?.data, ["data"]).map((entry) => {
+				const record = asRecord(entry) ?? {}
+				const id = firstString(record, ["id"])
+				const known = id ? this.ptys.get(id) : undefined
+				return {
+					id: id ?? null,
+					api: "pty",
+					command: known?.command ?? firstString(record, ["command"]) ?? null,
+					status: known?.status ?? firstString(record, ["status", "state"]) ?? null,
+					exitCode: known?.exitCode ?? firstNumber(record, ["exitCode"]) ?? null,
+				}
+			})
+			return [...remote, ...local]
+		}
+		if (caps.shellApi !== "v2") return [...tracked, ...local]
 		const response = await this.request("GET", "/api/shell")
 		if (!response.ok) return local
 		const remote = toArray(response.data, ["shells", "items", "data"]).map((entry) => {

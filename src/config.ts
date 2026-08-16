@@ -28,6 +28,12 @@ export interface BridgeConfig {
 	/** Optional bearer token required by the bridge's own HTTP endpoint. */
 	mcpToken?: string
 	shellDefaultTimeoutSeconds: number
+	/** Which shell route to prefer. "auto" picks the pty whenever the build has one. */
+	shellBackend: "auto" | "pty" | "v2" | "legacy"
+	/** Program the pty route runs the command with. */
+	ptyShell: string
+	/** Scrollback the bridge keeps per pty job, in characters. */
+	ptyBufferChars: number
 }
 
 /**
@@ -74,6 +80,10 @@ function list(value: string | undefined, fallback: string[]): string[] {
 		.filter((item) => item.length > 0)
 }
 
+function backend(value: string | undefined): "auto" | "pty" | "v2" | "legacy" {
+	return value === "pty" || value === "v2" || value === "legacy" ? value : "auto"
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
 	const password = env.OPENCODE_SERVER_PASSWORD
 	return {
@@ -95,6 +105,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
 		httpPort: num(env.OPENCODE_MCP_PORT, 8787),
 		mcpToken: env.OPENCODE_MCP_TOKEN,
 		shellDefaultTimeoutSeconds: num(env.OPENCODE_MCP_SHELL_TIMEOUT_SECONDS, 120),
+		shellBackend: backend(env.OPENCODE_MCP_SHELL_BACKEND),
+		ptyShell: env.OPENCODE_MCP_PTY_SHELL ?? "bash",
+		ptyBufferChars: num(env.OPENCODE_MCP_PTY_BUFFER_CHARS, 1_000_000),
 	}
 }
 

@@ -15,7 +15,8 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
 | エージェント実行の待ち時間 | `POST /session/{id}/message` は完了までブロック（数分）→ 60 秒制限で必ず失敗 | ✅ `opencode_start` が即返し、`opencode_wait` で分割ポーリング |
 | シェルの長時間コマンド | 完了までブロック | ✅ ジョブ化して `opencode_shell_output` で増分取得、延長・kill も可能 |
 | 危険コマンド | 設定次第 | ✅ ブリッジ側にも deny/allow のガードを二重化 |
-| API のバージョン差 | v2 experimental な `/api/shell` はビルドにより存在しない | ✅ 起動時に能力を検出し、無ければ旧 API に自動フォールバック |
+| API のバージョン差 | v2 experimental な `/api/shell` はビルドにより存在しない | ✅ 起動時に能力を検出し、`/api/pty` → `/api/shell` → 旧 API の順に自動フォールバック |
+| モデル不要のコマンド実行 | 旧 API のシェルは AI エージェント経由のため、モデル未設定だと `UnknownError` で失敗 | ✅ `/api/pty` で本物の端末を直接起動。API キーなしでも `ls` や `git` が動く |
 
 ## アーキテクチャ
 
@@ -26,6 +27,7 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
   opencode-mcp-bridge  ──  HTTP  ──▶  opencode serve (127.0.0.1:4096)
         │                                   │
         │                                   ├── /session, /session/{id}/prompt_async
+        │                                   ├── /api/pty（本物の端末・モデル不要）
         │                                   ├── /api/shell（v2）または /session/{id}/shell（legacy）
         │                                   ├── /file/content, /find, /find/file
         │                                   └── /permission, /question
@@ -46,12 +48,24 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
 ### シェル
 | ツール | 説明 |
 | --- | --- |
-| `opencode_shell` | コマンドをジョブとして開始し、`wait_seconds`（既定 5 秒）だけ待つ。終わらなければ `shell_id` と `cursor` を返す |
+| `opencode_shell` | コマンドを PTY ジョブとして開始し、`wait_seconds`（既定 5 秒）だけ待つ。終わらなければ `shell_id` と `cursor` を返す |
 | `opencode_shell_output` | `cursor` 以降の出力だけを増分取得。完了するまでツール内で最大 45 秒待機 |
 | `opencode_shell_status` | ジョブの状態・終了コード |
 | `opencode_shell_list` | 実行中/完了済みジョブ一覧 |
-| `opencode_shell_extend` | タイムアウト延長（v2 API のみ） |
+| `opencode_shell_extend` | タイムアウト延長（PTY / v2 API のみ。legacy は開始時に固定） |
 | `opencode_shell_kill` | ジョブを強制終了 |
+
+#### シェルの実行経路（重要）
+
+`opencode_shell` 系は、接続先 opencode の能力に応じて次の順に経路を選びます。ツール名・引数・`cursor` の意味は経路が変わっても同じです。
+
+| 優先 | 経路 | 中身 | モデル（API キー）|
+| --- | --- | --- | --- |
+| 1 | `/api/pty` | opencode が本物の擬似端末を起動し、出力を WebSocket で配信。終了コードもそのまま取得 | 不要 |
+| 2 | `/api/shell`（v2） | experimental なシェル API | 不要 |
+| 3 | `/session/{id}/shell` | AI エージェントにコマンドを実行させる旧経路 | **必要** |
+
+`OPENCODE_MCP_SHELL_BACKEND` で経路を固定できます（`auto` / `pty` / `v2` / `legacy`）。PTY 経路では `TERM=dumb` を渡し、色や制御文字を除去した素のテキストを返します。
 
 ### ファイル・検索
 | ツール | 説明 |
@@ -72,7 +86,7 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
 ### 診断
 | ツール | 説明 |
 | --- | --- |
-| `opencode_health` | 接続確認と API 能力検出（`shellApi: v2 / legacy` など） |
+| `opencode_health` | 接続確認と API 能力検出（`shellApi: pty / v2 / legacy` など） |
 
 すべてのツールは JSON テキストを返し、`ok` と **`next_action`**（次に呼ぶべきツールのヒント）を含みます。
 これにより、tool calling に不慣れなチャット AI でも「次に何をすればよいか」を迷いません。
@@ -136,6 +150,9 @@ stdio:
 | `OPENCODE_MCP_HOST` / `OPENCODE_MCP_PORT` | `127.0.0.1` / `8787` | ブリッジの待受 |
 | `OPENCODE_MCP_TOKEN` | – | 設定すると `Authorization: Bearer` か `x-mcp-token` を要求 |
 | `OPENCODE_MCP_WAIT_MAX_SECONDS` | `45` | 1 回のツール呼び出しで待つ最大秒数（上限 50） |
+| `OPENCODE_MCP_SHELL_BACKEND` | `auto` | シェル経路の固定（`auto` / `pty` / `v2` / `legacy`） |
+| `OPENCODE_MCP_PTY_SHELL` | `bash` | PTY 経路でコマンドを渡すシェル |
+| `OPENCODE_MCP_PTY_BUFFER_CHARS` | `1000000` | PTY 1 本あたりに保持する出力量（文字） |
 | `OPENCODE_MCP_POLL_INTERVAL_MS` | `1000` | ポーリング間隔 |
 | `OPENCODE_MCP_REQUEST_TIMEOUT_MS` | `20000` | opencode への 1 リクエストのタイムアウト |
 | `OPENCODE_MCP_MAX_OUTPUT_CHARS` | `20000` | 1 レスポンスの最大文字数（超過分は切り詰め、続きは cursor で取得） |

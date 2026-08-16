@@ -71,7 +71,7 @@ export function registerTools(server: McpServer, client: OpencodeClient, config:
 		"opencode_health",
 		{
 			title: "Check the opencode server",
-			description: "Ping the configured opencode server and report which API flavour the bridge detected (v2 /api/shell vs legacy, prompt_async support, VCS base path).",
+			description: "Ping the configured opencode server and report which API flavour the bridge detected (pty, v2 /api/shell or legacy shell route, prompt_async support, VCS base path).",
 			inputSchema: { refresh: z.boolean().optional().describe("Re-probe instead of using the cached capability snapshot.") },
 		},
 		handler(async (args) => ok({ ok: true, capabilities: await client.capabilities(args?.refresh === true) })),
@@ -222,7 +222,7 @@ export function registerTools(server: McpServer, client: OpencodeClient, config:
 		{
 			title: "Run a shell command (async job)",
 			description:
-				"Run a command through opencode's shell API without going through the LLM. Returns a shell_id immediately and, if the command finishes quickly, its first output chunk. Guarded by the bridge deny/allow patterns.",
+				"Run a shell command in a real terminal through opencode's pty API, with no model in the loop. Older builds fall back to the v2 shell API and then to the agent driven legacy route. Returns a shell_id immediately and, if the command finishes quickly, its first output chunk. Guarded by the bridge deny/allow patterns.",
 			inputSchema: {
 				command: z.string().min(1),
 				directory: z.string().optional(),
