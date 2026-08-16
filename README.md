@@ -15,7 +15,7 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
 | エージェント実行の待ち時間 | `POST /session/{id}/message` は完了までブロック（数分）→ 60 秒制限で必ず失敗 | ✅ `opencode_start` が即返し、`opencode_wait` で分割ポーリング |
 | シェルの長時間コマンド | 完了までブロック | ✅ ジョブ化して `opencode_shell_output` で増分取得、延長・kill も可能 |
 | 危険コマンド | 設定次第 | ✅ ブリッジ側にも deny/allow のガードを二重化 |
-| API のバージョン差 | v2 experimental な `/api/shell` はビルドにより存在しない | ✅ 起動時に能力を検出し、`/api/pty` → `/api/shell` → 旧 API の順に自動フォールバック |
+| API のバージョン差 | v2 experimental な `/api/shell` はビルドにより存在しない | ✅ 起動時に能力を検出し、`/api/pty` → `/api/shell` → 旧 API の順に自動フォールバック。起動レースで pty を取り逃しても次のシェル実行時に再判定して復帰 |
 | モデル不要のコマンド実行 | 旧 API のシェルは AI エージェント経由のため、モデル未設定だと `UnknownError` で失敗 | ✅ `/api/pty` で本物の端末を直接起動。API キーなしでも `ls` や `git` が動く |
 
 ## アーキテクチャ
@@ -66,6 +66,8 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
 | 3 | `/session/{id}/shell` | AI エージェントにコマンドを実行させる旧経路 | **必要** |
 
 `OPENCODE_MCP_SHELL_BACKEND` で経路を固定できます（`auto` / `pty` / `v2` / `legacy`）。PTY 経路では `TERM=dumb` を渡し、色や制御文字を除去した素のテキストを返します。
+
+能力検出は起動時に一度走りますが、opencode 本体の起動が遅れていると `/api/pty` を取り逃すことがあります。その一度きりの失敗で以降ずっとモデル依存の旧 API に落ちないよう、`auto` / `pty` では「pty なし」と判定してから 15 秒以上経っていればシェル実行時に再判定します。pty の起動そのものを拒否したビルドでは、この再判定は行いません。
 
 ### ファイル・検索
 | ツール | 説明 |

@@ -233,6 +233,11 @@ export function isJsonPayload(response: { data: unknown; text: string }): boolea
 export class OpencodeClient {
 	private readonly config: BridgeConfig
 	private caps: Capabilities | null = null
+	private capsAt = 0
+	// Set only when a build that advertises /api/pty refuses to start one, so a
+	// genuine no is remembered while a missed probe is not.
+	private ptyRefused = false
+	private static readonly PTY_RECHECK_MS = 15_000
 	private promptAsyncSupported = true
 	private sessionStatusSupported = true
 	private readonly jobs = new Map<string, LocalJob>()
@@ -301,8 +306,20 @@ export class OpencodeClient {
 		return response.data
 	}
 
+	/**
+	 * True when the last probe found no pty but the server may simply have been
+	 * mid-boot. The pty route is the only shell that needs no model, so being
+	 * wrong about it once must not pin the process to the fallbacks for the life
+	 * of the box.
+	 */
+	private shouldRecheckPty(): boolean {
+		if (!this.caps || this.caps.ptyApi || this.ptyRefused) return false
+		if (this.config.shellBackend !== "auto" && this.config.shellBackend !== "pty") return false
+		return Date.now() - this.capsAt >= OpencodeClient.PTY_RECHECK_MS
+	}
+
 	async capabilities(force = false): Promise<Capabilities> {
-		if (this.caps && !force) return this.caps
+		if (this.caps && !force && !this.shouldRecheckPty()) return this.caps
 		const caps: Capabilities = {
 			baseUrl: this.config.baseUrl,
 			reachable: false,
@@ -368,6 +385,7 @@ export class OpencodeClient {
 		}
 		caps.promptAsync = this.promptAsyncSupported
 		this.caps = caps
+		this.capsAt = Date.now()
 		return caps
 	}
 
@@ -502,6 +520,7 @@ export class OpencodeClient {
 			} catch {
 				// A build that advertises /api/pty but will not start one is not worth
 				// retrying on every call: remember that and use the older routes.
+				this.ptyRefused = true
 				if (this.caps) this.caps.shellApi = "legacy"
 			}
 		}
