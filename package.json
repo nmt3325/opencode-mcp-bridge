@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": { "opencode-mcp-bridge": "dist/index.js" },
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",

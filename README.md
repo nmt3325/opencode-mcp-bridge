@@ -34,7 +34,51 @@ MCP しか接続できない AI チャット（tool calling API を直接使え�
         └── 55 秒ハードキャップ + ジョブ管理 + コマンドガード
 ```
 
-## ツール一覧（20 個）
+## モデル向けツールの MCP 移植（tool calling の代替）
+
+opencode がモデルに渡すツールは `GET /experimental/tool/ids` で確認できる 14 個で、
+実際のスキーマは `GET /experimental/tool?provider=&model=` が返す。
+ただし **ツールを実行する HTTP エンドポイントは存在しない**（一覧系の 2 本だけ）。
+そこでブリッジ側でスキーマを 1:1 で写し取り、実行はブリッジ自身が行う。
+
+これにより tool calling に対応していない MCP クライアント（Notion AI など）が
+モデルの位置に入り、プロバイダの API キーを一切登録せずに
+調査 → 編集 → テスト → diff 確認までを回せる。
+
+| MCP ツール | opencode 側の実体 | 実行経路 |
+| --- | --- | --- |
+| `bash` | `bash`（command / timeout / workdir） | opencode の pty API。実端末で exit code まで取得 |
+| `read` | `read`（filePath / offset / limit） | 行番号付き。既定 2000 行 |
+| `write` | `write`（filePath / content） | 親ディレクトリを作成して上書き |
+| `edit` | `edit`（filePath / oldString / newString / replaceAll） | 完全一致置換。一意でなければエラー |
+| `glob` | `glob`（pattern / path） | `**` `*` `?` `{a,b}`。更新の新しい順 |
+| `grep` | `grep`（pattern / path / include） | 正規表現。ファイル名と行番号を返す |
+| `webfetch` | `webfetch`（url / format / timeout） | 認証情報不要 |
+| `todowrite` | `todowrite`（todos） | セッションのタスク一覧 |
+| `opencode_model_tools` | — | opencode の一覧と本ミラーを突き合わせて差分を報告 |
+
+写していないもの（`opencode_model_tools` が理由付きで返す）:
+
+- `task` … サブエージェント起動。モデルが必要。ここでは MCP クライアント自身が実行する
+- `skill` … モデルの文脈にプロンプトを差し込むだけ。`opencode_skills` で中身を読めば足りる
+- `question` … 操作者への質問。ここでは MCP クライアントが操作者なので自分のユーザーに聞く
+- `websearch` … プロバイダの認証情報が必要
+- `apply_patch` … 一部プロバイダにしか出さない。`edit` と `write` で代替できる
+- `invalid` … 不正なツール呼び出し用のプレースホルダ
+
+opencode が更新されて 14 個の構成が変わったら `opencode_model_tools` を呼ぶと
+`not_mirrored` と `mirrored_but_missing_upstream` に差分が出る。
+
+> `write` と `edit` はブリッジのプロセスが直接ファイルを書くため、
+> opencode の permission 機構（`OPENCODE_PERMISSION`）は通らない。
+> `bash` は pty 経由なのでブリッジの deny / allow パターンで守られる。
+
+## ツール一覧（29 個）
+
+### モデル向けツール（opencode が本来モデルに渡すもの）
+
+`bash` / `read` / `write` / `edit` / `glob` / `grep` / `webfetch` / `todowrite` / `opencode_model_tools`
+（詳細は上の表を参照）
 
 ### エージェント
 | ツール | 説明 |
