@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      OPENCODE_MCP_RUNTIME_DIR: ${{ runner.temp }}/opencode-native-runtime
+      OPENCODE_MCP_RUNTIME_DIR: /tmp/opencode-native-runtime
     steps:
       - uses: actions/checkout@v4
         with:
