@@ -116,10 +116,10 @@ export class OpencodeClient {
       job.error = job.cancelReason ?? message.error
       job.permission = undefined
       clearTimeout(job.timer)
-      job.bytes = Buffer.byteLength(JSON.stringify(job.result ?? {}))
     } else throw new Error("Unknown native response type")
+    job.bytes = Buffer.byteLength(JSON.stringify(this.snapshot(job.job_id)))
     this.changed.emit(job.job_id)
-    this.prune()
+    this.prune(job.job_id)
   }
   private send(value: unknown): void {
     if (this.fatal) throw this.fatal
@@ -143,11 +143,11 @@ export class OpencodeClient {
     const force = setTimeout(() => { if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL") }, 5000)
     force.unref()
   }
-  private prune(): void {
+  private prune(protectedId?: string): void {
     let bytes = [...this.jobs.values()].reduce((total, job) => total + job.bytes, 0)
     for (const [id, job] of this.jobs) {
       if (this.jobs.size < this.config.maxJobs && bytes <= 32 * 1024 * 1024) break
-      if (!isTerminal(job.status) || this.changed.listenerCount(id)) continue
+      if (id === protectedId || !isTerminal(job.status) || this.changed.listenerCount(id)) continue
       bytes -= job.bytes; this.jobs.delete(id)
     }
   }
@@ -202,7 +202,9 @@ export class OpencodeClient {
     const job = this.get(id)
     if (!isTerminal(job.status) && !job.cancelReason) {
       job.cancelReason = reason; job.status = "cancelling"; job.permission = undefined
-      this.send({ type: "cancel", id }); this.changed.emit(id)
+      try { this.send({ type: "cancel", id }) }
+      catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))) }
+      this.changed.emit(id)
     }
     return this.snapshot(id)
   }
@@ -213,10 +215,14 @@ export class OpencodeClient {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { this.acknowledgements.delete(rpc); reject(new Error("Permission reply acknowledgement timed out; inspect the existing job before retrying")) }, 5000)
       this.acknowledgements.set(rpc, { resolve, reject, timer })
-      job.permission = undefined; job.status = "running"
       try { this.send({ type: "reply", id: rpc, job_id: id, permission_id: permissionId, reply }) }
       catch (error) { clearTimeout(timer); this.acknowledgements.delete(rpc); reject(error) }
     })
+    // ACK may share a frame with completion or a newer permission request.
+    if (job.status === "awaiting_permission" && job.permission?.id === permissionId) {
+      job.permission = undefined; job.status = "running"
+      this.changed.emit(id)
+    }
   }
   async stop(): Promise<void> {
     if (this.stopping) return

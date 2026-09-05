@@ -117,12 +117,15 @@ async function main(): Promise<void> {
       const server = buildMcpServer(client, config)
       await server.connect(new StdioServerTransport())
       close = async () => { await server.close(); await client.stop() }
-      process.stdin.once("end", () => { void close() })
       console.error("[toolbox] stdio ready")
     }
     let closing = false
     const shutdown = () => { if (closing) return; closing = true; void close().then(() => process.exit(0), () => process.exit(1)) }
     process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown)
+    if (args.mode === "stdio") {
+      if (process.stdin.readableEnded) shutdown()
+      else process.stdin.once("end", shutdown)
+    }
   } catch (error) { await client.stop(); throw error }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

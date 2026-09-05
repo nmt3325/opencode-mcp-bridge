@@ -55,6 +55,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   if (dirname(root) === root) throw new Error("The filesystem root cannot be the toolbox workspace")
   const key = createHash("sha256").update(root).digest("hex").slice(0, 20)
   const policy = env.OPENCODE_MCP_PERMISSIONS ? permissions.parse(JSON.parse(env.OPENCODE_MCP_PERMISSIONS)) : {}
+  const maxJobs = integer(env, "OPENCODE_MCP_MAX_JOBS", 64, 8, 256)
+  const maxConcurrent = integer(env, "OPENCODE_MCP_MAX_CONCURRENT", 8, 1, 32)
+  if (maxConcurrent > maxJobs) throw new Error("OPENCODE_MCP_MAX_CONCURRENT must not exceed OPENCODE_MCP_MAX_JOBS")
   return {
     root,
     runtimeDir: resolve(env.OPENCODE_MCP_RUNTIME_DIR ?? join(PACKAGE_ROOT, ".opencode-runtime")),
@@ -65,8 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     mcpToken: env.OPENCODE_MCP_TOKEN,
     waitMs: integer(env, "OPENCODE_MCP_WAIT_MAX_SECONDS", 45, 0, 50) * 1000,
     jobTimeoutMs: integer(env, "OPENCODE_MCP_JOB_TIMEOUT_SECONDS", 600, 5, 3600) * 1000,
-    maxJobs: integer(env, "OPENCODE_MCP_MAX_JOBS", 64, 8, 256),
-    maxConcurrent: integer(env, "OPENCODE_MCP_MAX_CONCURRENT", 8, 1, 32),
+    maxJobs, maxConcurrent,
     permissions: policy,
     lsp: boolean(env, "OPENCODE_MCP_LSP"),
     formatter: boolean(env, "OPENCODE_MCP_FORMATTER"),
