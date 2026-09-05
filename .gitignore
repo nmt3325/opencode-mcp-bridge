@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.log
 .run/
+.opencode-runtime/
+*.tgz
+.env
+.env.*

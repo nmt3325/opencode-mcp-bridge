@@ -1,255 +1,121 @@
-# opencode-mcp-bridge
+# OpenCode MCP execution toolbox
 
-[opencode](https://opencode.ai) の HTTP サーバー (`opencode serve`) を **MCP (Model Context Protocol) サーバー**として公開するブリッジです。
-MCP しか接続できない AI チャット（tool calling API を直接使えないクライアント）から、opencode のコーディングエージェントとシェルをフル機能で操作するために作りました。
-
-> **設計上の最重要ポイント**: すべての MCP ツールは **必ず 55 秒以内にレスポンスを返します**。
-> 60 秒でタイムアウトする MCP クライアントでも「呼び出し失敗」にならないよう、長時間処理は必ず
-> 「開始 → ジョブ ID を返す → ポーリング」の非同期パターンに分解しています。
-
-## なぜブリッジが必要か
-
-| 課題 | 素の opencode | 本ブリッジ |
-| --- | --- | --- |
-| MCP サーバーとして起動できるか | ❌ opencode は MCP *クライアント*機能しか持たない | ✅ Streamable HTTP / stdio の MCP サーバー |
-| エージェント実行の待ち時間 | `POST /session/{id}/message` は完了までブロック（数分）→ 60 秒制限で必ず失敗 | ✅ `opencode_start` が即返し、`opencode_wait` で分割ポーリング |
-| シェルの長時間コマンド | 完了までブロック | ✅ ジョブ化して `opencode_shell_output` で増分取得、延長・kill も可能 |
-| 危険コマンド | 設定次第 | ✅ ブリッジ側にも deny/allow のガードを二重化 |
-| API のバージョン差 | v2 experimental な `/api/shell` はビルドにより存在しない | ✅ 起動時に能力を検出し、`/api/pty` → `/api/shell` → 旧 API の順に自動フォールバック。起動レースで pty を取り逃しても次のシェル実行時に再判定して復帰 |
-| モデル不要のコマンド実行 | 旧 API のシェルは AI エージェント経由のため、モデル未設定だと `UnknownError` で失敗 | ✅ `/api/pty` で本物の端末を直接起動。API キーなしでも `ls` や `git` が動く |
-
-## アーキテクチャ
+**This bridge is exclusively a toolbox.** Notion AI (or another MCP client) handles reasoning and planning. The bridge runs tools; it does not ask another LLM to do the work. There is no agent/delegation mode or legacy execution fallback.
 
 ```text
-  MCP クライアント (60 秒制限あり)
-        │  Streamable HTTP: POST /mcp    （または stdio）
-        ▼
-  opencode-mcp-bridge  ──  HTTP  ──▶  opencode serve (127.0.0.1:4096)
-        │                                   │
-        │                                   ├── /session, /session/{id}/prompt_async
-        │                                   ├── /api/pty（本物の端末・モデル不要）
-        │                                   ├── /api/shell（v2）または /session/{id}/shell（legacy）
-        │                                   ├── /file/content, /find, /find/file
-        │                                   └── /permission, /question
-        └── 55 秒ハードキャップ + ジョブ管理 + コマンドガード
+Notion AI → MCP (stdio / Streamable HTTP) → private Bun worker → actual OpenCode tools
 ```
 
-## モデル向けツールの MCP 移植（tool calling の代替）
+## What is native, and what belongs to the bridge?
 
-opencode がモデルに渡すツールは `GET /experimental/tool/ids` で確認できる 14 個で、
-実際のスキーマは `GET /experimental/tool?provider=&model=` が返す。
-ただし **ツールを実行する HTTP エンドポイントは存在しない**（一覧系の 2 本だけ）。
-そこでブリッジ側でスキーマを 1:1 で写し取り、実行はブリッジ自身が行う。
+The worker imports `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`, `ShellTool`, `WebFetchTool`, and `TodoWriteTool` from the **unchanged, pinned OpenCode source checkout**. It initializes them with `Tool.init`, exports their descriptions/input schemas with `ToolJsonSchema.fromTool`, and calls their native `execute` implementations.
 
-これにより tool calling に対応していない MCP クライアント（Notion AI など）が
-モデルの位置に入り、プロバイダの API キーを一切登録せずに
-調査 → 編集 → テスト → diff 確認までを回せる。
+File reading, writing, replacement, ripgrep search, globbing, shell execution, HTML conversion, native truncation, and TODO storage are **not reimplemented here**. The bridge only supplies the execution context, transport, job lifecycle, path checks, and permission confirmation transport. Native permission matching uses OpenCode's `Permission.fromConfig/merge/evaluate`.
 
-| MCP ツール | opencode 側の実体 | 実行経路 |
-| --- | --- | --- |
-| `bash` | `bash`（command / timeout / workdir） | opencode の pty API。実端末で exit code まで取得 |
-| `read` | `read`（filePath / offset / limit） | 行番号付き。既定 2000 行 |
-| `write` | `write`（filePath / content） | 親ディレクトリを作成して上書き |
-| `edit` | `edit`（filePath / oldString / newString / replaceAll） | 完全一致置換。一意でなければエラー |
-| `glob` | `glob`（pattern / path） | `**` `*` `?` `{a,b}`。更新の新しい順 |
-| `grep` | `grep`（pattern / path / include） | 正規表現。ファイル名と行番号を返す |
-| `webfetch` | `webfetch`（url / format / timeout） | 認証情報不要 |
-| `todowrite` | `todowrite`（todos） | セッションのタスク一覧 |
-| `opencode_model_tools` | — | opencode の一覧と本ミラーを突き合わせて差分を報告 |
+The worker has a fixed non-inference execution profile and fixed configuration/plugin services. It does not initialize model/provider discovery, user/project plugins, MCP clients, agent generation, `LLM`, or `SessionPrompt`. A startup dependency-graph check rejects inference-capable services. A native session and native session projector provide the real storage context needed by file timestamps and TODOs; that is bookkeeping, not a model conversation.
 
-写していないもの（`opencode_model_tools` が理由付きで返す）:
+Pinned upstream: **OpenCode v1.18.29**, commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a`, **Bun 1.3.14**. Internal APIs are not a stable upstream public execution API, so upgrades must be intentional and retested.
 
-- `task` … サブエージェント起動。モデルが必要。ここでは MCP クライアント自身が実行する
-- `skill` … モデルの文脈にプロンプトを差し込むだけ。`opencode_skills` で中身を読めば足りる
-- `question` … 操作者への質問。ここでは MCP クライアントが操作者なので自分のユーザーに聞く
-- `websearch` … プロバイダの認証情報が必要
-- `apply_patch` … 一部プロバイダにしか出さない。`edit` と `write` で代替できる
-- `invalid` … 不正なツール呼び出し用のプレースホルダ
+## Install
 
-opencode が更新されて 14 個の構成が変わったら `opencode_model_tools` を呼ぶと
-`not_mirrored` と `mirrored_but_missing_upstream` に差分が出る。
+Requirements: Node.js 22+, npm, Git, and **Bun 1.3.14**. Linux is the verified platform. A standalone `opencode` executable does not expose the internal modules and is not sufficient.
 
-> `write` と `edit` はブリッジのプロセスが直接ファイルを書くため、
-> opencode の permission 機構（`OPENCODE_PERMISSION`）は通らない。
-> `bash` は pty 経由なのでブリッジの deny / allow パターンで守られる。
-
-## ツール一覧（29 個）
-
-### モデル向けツール（opencode が本来モデルに渡すもの）
-
-`bash` / `read` / `write` / `edit` / `glob` / `grep` / `webfetch` / `todowrite` / `opencode_model_tools`
-（詳細は上の表を参照）
-
-### エージェント
-| ツール | 説明 |
-| --- | --- |
-| `opencode_start` | プロンプトを投げてセッションを開始（即座に `session_id` を返す）。`prompt_async` が無い環境ではバックグラウンド送信にフォールバック |
-| `opencode_wait` | 指定秒数だけ完了を待つ。未完なら `finished:false` と待機中の permission を返すので、そのまま再呼び出しすればよい |
-| `opencode_result` | セッションのメッセージ履歴を取得（ページング対応） |
-| `opencode_abort` | 実行中のセッションを中断 |
-| `opencode_sessions` | セッション一覧 |
-
-### シェル
-| ツール | 説明 |
-| --- | --- |
-| `opencode_shell` | コマンドを PTY ジョブとして開始し、`wait_seconds`（既定 5 秒）だけ待つ。終わらなければ `shell_id` と `cursor` を返す |
-| `opencode_shell_output` | `cursor` 以降の出力だけを増分取得。完了するまでツール内で最大 45 秒待機 |
-| `opencode_shell_status` | ジョブの状態・終了コード |
-| `opencode_shell_list` | 実行中/完了済みジョブ一覧 |
-| `opencode_shell_extend` | タイムアウト延長（PTY / v2 API のみ。legacy は開始時に固定） |
-| `opencode_shell_kill` | ジョブを強制終了 |
-
-#### シェルの実行経路（重要）
-
-`opencode_shell` 系は、接続先 opencode の能力に応じて次の順に経路を選びます。ツール名・引数・`cursor` の意味は経路が変わっても同じです。
-
-| 優先 | 経路 | 中身 | モデル（API キー）|
-| --- | --- | --- | --- |
-| 1 | `/api/pty` | opencode が本物の擬似端末を起動し、出力を WebSocket で配信。終了コードもそのまま取得 | 不要 |
-| 2 | `/api/shell`（v2） | experimental なシェル API | 不要 |
-| 3 | `/session/{id}/shell` | AI エージェントにコマンドを実行させる旧経路 | **必要** |
-
-`OPENCODE_MCP_SHELL_BACKEND` で経路を固定できます（`auto` / `pty` / `v2` / `legacy`）。PTY 経路では `TERM=dumb` を渡し、色や制御文字を除去した素のテキストを返します。
-
-能力検出は起動時に一度走りますが、opencode 本体の起動が遅れていると `/api/pty` を取り逃すことがあります。その一度きりの失敗で以降ずっとモデル依存の旧 API に落ちないよう、`auto` / `pty` では「pty なし」と判定してから 15 秒以上経っていればシェル実行時に再判定します。pty の起動そのものを拒否したビルドでは、この再判定は行いません。
-
-### ファイル・検索
-| ツール | 説明 |
-| --- | --- |
-| `opencode_read` | ファイル読み取り（オフセット/行数指定可） |
-| `opencode_grep` | 内容検索 |
-| `opencode_find_file` | ファイル名検索 |
-| `opencode_diff` | 作業ツリーの差分 |
-
-### 承認（permission / question）
-| ツール | 説明 |
-| --- | --- |
-| `opencode_permissions_pending` | 承認待ちの一覧 |
-| `opencode_permission_reply` | `once` / `always` / `reject` で応答 |
-| `opencode_questions_pending` | エージェントからの質問一覧 |
-| `opencode_question_reply` | 質問への回答 |
-
-### 診断
-| ツール | 説明 |
-| --- | --- |
-| `opencode_health` | 接続確認と API 能力検出（`shellApi: pty / v2 / legacy` など） |
-
-すべてのツールは JSON テキストを返し、`ok` と **`next_action`**（次に呼ぶべきツールのヒント）を含みます。
-これにより、tool calling に不慣れなチャット AI でも「次に何をすればよいか」を迷いません。
-
-## セットアップ
-
-```bash
-git clone https://github.com/nmt3325/opencode-mcp-bridge.git
-cd opencode-mcp-bridge
-npm install
+```sh
+npm ci
 npm run build
-
-# 1) opencode をサーバーモードで起動
-opencode serve --port 4096 --hostname 127.0.0.1
-
-# 2) ブリッジを起動（HTTP モード）
-OPENCODE_BASE_URL=http://127.0.0.1:4096 \
-OPENCODE_MCP_TOKEN=$(openssl rand -hex 24) \
-node dist/index.js --http --port 8787
+# Install Bun 1.3.14 beforehand, then:
+npm run setup:native
 ```
 
-stdio で使う場合は `node dist/index.js --stdio`。
+Setup clones the pinned upstream source to `.opencode-runtime`, installs its frozen workspace dependencies with lifecycle scripts disabled, and copies only this repository's small adapter into an untracked `.mcp-toolbox` directory. It does not modify upstream tool implementations. It refuses an existing checkout at a different commit or with tracked modifications.
 
-### MCP クライアント設定例
+At startup the bridge checks the Bun version, upstream Git commit, clean tracked source, and adapter hashes. Missing or incompatible runtime is an error, never a fallback to an agent or local replacement implementation. Keep the runtime and state directories **outside the editable workspace**. Install the runtime under the service user's ownership so Git's ownership checks succeed.
 
-Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "opencode": {
-      "type": "http",
-      "url": "http://127.0.0.1:8787/mcp",
-      "headers": { "Authorization": "Bearer <OPENCODE_MCP_TOKEN>" }
-    }
-  }
-}
+```sh
+export OPENCODE_MCP_ROOT=/absolute/path/to/workspace
+# Optional: defaults to .opencode-runtime beside this package
+export OPENCODE_MCP_RUNTIME_DIR=/absolute/path/to/pinned-opencode
+# Optional: override the Bun executable
+export OPENCODE_MCP_BUN=/absolute/path/to/bun
+npm start
 ```
 
-stdio:
+For HTTP:
 
-```json
-{
-  "mcpServers": {
-    "opencode": {
-      "command": "node",
-      "args": ["/path/to/opencode-mcp-bridge/dist/index.js", "--stdio"],
-      "env": { "OPENCODE_BASE_URL": "http://127.0.0.1:4096" }
-    }
-  }
-}
+```sh
+export OPENCODE_MCP_TOKEN='<a strong random token of at least 24 characters>'
+npm run start:http
 ```
 
-## 環境変数
+Connect the client to `http://127.0.0.1:8787/mcp` with `Authorization: Bearer <token>` (or `x-mcp-token`). Authentication is required even on loopback. `/healthz` contains only health/mode/version. Browser Origin requests are rejected. For remote Notion connections, deploy behind HTTPS and configure authentication in Notion's connection UI; never paste secrets into prompts. This repository does not deploy or connect an endpoint automatically.
 
-| 変数 | 既定値 | 説明 |
-| --- | --- | --- |
-| `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | opencode サーバーの URL |
-| `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | – | opencode 側 Basic 認証 |
-| `OPENCODE_API_TOKEN` | – | Bearer で送る場合 |
-| `OPENCODE_MCP_HOST` / `OPENCODE_MCP_PORT` | `127.0.0.1` / `8787` | ブリッジの待受 |
-| `OPENCODE_MCP_TOKEN` | – | 設定すると `Authorization: Bearer` か `x-mcp-token` を要求 |
-| `OPENCODE_MCP_WAIT_MAX_SECONDS` | `45` | 1 回のツール呼び出しで待つ最大秒数（上限 50） |
-| `OPENCODE_MCP_SHELL_BACKEND` | `auto` | シェル経路の固定（`auto` / `pty` / `v2` / `legacy`） |
-| `OPENCODE_MCP_PTY_SHELL` | `bash` | PTY 経路でコマンドを渡すシェル |
-| `OPENCODE_MCP_PTY_BUFFER_CHARS` | `1000000` | PTY 1 本あたりに保持する出力量（文字） |
-| `OPENCODE_MCP_POLL_INTERVAL_MS` | `1000` | ポーリング間隔 |
-| `OPENCODE_MCP_REQUEST_TIMEOUT_MS` | `20000` | opencode への 1 リクエストのタイムアウト |
-| `OPENCODE_MCP_MAX_OUTPUT_CHARS` | `20000` | 1 レスポンスの最大文字数（超過分は切り詰め、続きは cursor で取得） |
-| `OPENCODE_MCP_SHELL_TIMEOUT_SECONDS` | `120` | シェルジョブの既定タイムアウト |
-| `OPENCODE_MCP_DENY_PATTERNS` | 下記 | 追加の拒否パターン（`,` 区切り、ワイルドカード可） |
-| `OPENCODE_MCP_ALLOW_PATTERNS` | – | 設定するとホワイトリスト運用になる |
-| `OPENCODE_MCP_DEFAULT_DIRECTORY` / `_AGENT` / `_MODEL` | – | 既定の作業ディレクトリ / エージェント / モデル |
+## Tools
 
-既定の拒否パターン: `rm -rf /`, `rm -rf /*`, `rm -rf ~`, `mkfs*`, `dd if=* of=/dev/*`, `shutdown*`, `reboot*`, `halt*`, `chmod -R 777 /*`, フォークボム など。
+Native names: `read`, `write`, `edit`, `glob`, `grep`, `bash`, `webfetch`, `todowrite`.
 
-## セキュリティ
+Their schemas come directly from the running pinned upstream tools. Do not use the old mirrored schemas. For example, native `bash` requires `command` (not a bridge-specific `description`); `read` uses one-based `offset`; `todowrite` entries use `content`, `status`, and `priority`.
 
-- **必ず `127.0.0.1` にバインド**してください。opencode のサーバーモードは認証が無く、シェル実行 API を含みます（過去に `/find` 経由のコマンドインジェクション事例あり）。外部公開する場合は Tailscale / SSH トンネル + `OPENCODE_MCP_TOKEN` を併用してください。
-- ブリッジのガードは**二重防御の 1 枚目**です。opencode 側の `permission` 設定（`examples/opencode.json`）も必ず設定してください。
-- 可能なら専用コンテナ / VM 内で動かし、ホストの鍵や本番環境の認証情報を置かないこと。
+Control tools:
 
-## テスト
+| Tool | Purpose |
+| --- | --- |
+| `opencode_native_info` | Runtime pin, toolbox purpose, available native tools |
+| `opencode_job_list` | Bounded job summaries |
+| `opencode_job_result` | Retrieve a job; optionally wait up to 50 seconds |
+| `opencode_job_cancel` | Cancel a pending/running job |
+| `opencode_permissions_pending` | Outstanding native permission requests |
+| `opencode_permission_reply` | Approve once or reject a specific job/request pair |
 
-```bash
-npm test     # test/e2e.sh
+No `opencode_start`, agent-session management, prompt/message/command forwarding, `task`, question workflow, MCP sampling, or legacy `opencode_shell*` route is exposed. Unknown names fail without starting work.
+
+## Permissions and jobs
+
+Default policy allows `read` (with `.env`-style reads requiring confirmation), `glob`, `grep`, and `todowrite`. `write`/`edit`, `bash`, and `webfetch` require a decision. Native write/edit request the `edit` permission. External-directory, task, and question permissions are permanently denied. An operator may supply explicit native permission rules using `OPENCODE_MCP_PERMISSIONS`; there is no automatic blanket approval.
+
+A call returns a structured job with `job_id` and one of `running`, `awaiting_permission`, `cancelling`, `completed`, `failed`, or `cancelled`. Keep that ID instead of repeating the original operation. When awaiting permission, display the native request and use `opencode_permission_reply` with `job_id`, `permission_id`, and `reply: "once"` or `"reject"`. Approval is limited to that request; rejecting one job does not reject another.
+
+A bounded wait returning `running` is **not cancellation**. Poll `opencode_job_result` for the same job. Explicit cancellation and job deadlines propagate to native execution. There are no automatic retries, worker restarts, or duplicate command fallbacks. Native shell exit status is in `result.metadata.exit`; a completed execution can have a nonzero command exit code.
+
+Native output/metadata/diffs and data-URL attachments are preserved. If native truncation returns `metadata.outputPath`, `read` can follow that exact registered output file; this does not grant access to the rest of private state. Image attachments are forwarded as MCP images and other data-URL attachments as resources.
+
+One bridge process serves one workspace and one authenticated principal. HTTP transport reconnection does not lose jobs because the native worker belongs to the bridge, not an HTTP transport session. Job/results are bounded, in-memory, and lost on bridge restart. Native TODO state uses an OpenCode session in private SQLite storage; a new bridge process creates a new execution session.
+
+## Configuration
+
+| Variable | Default / meaning |
+| --- | --- |
+| `OPENCODE_MCP_ROOT` | Required, explicit workspace root; filesystem root is refused |
+| `OPENCODE_MCP_RUNTIME_DIR` | Package-local `.opencode-runtime` |
+| `OPENCODE_MCP_STATE_DIR` | Private per-root directory under `~/.local/state/opencode-mcp-bridge` |
+| `OPENCODE_MCP_BUN` | `bun` |
+| `OPENCODE_MCP_HOST` / `OPENCODE_MCP_PORT` | `127.0.0.1` / `8787` |
+| `OPENCODE_MCP_TOKEN` | Required for HTTP, at least 24 characters |
+| `OPENCODE_MCP_WAIT_MAX_SECONDS` | 45; allowed 0–50 |
+| `OPENCODE_MCP_JOB_TIMEOUT_SECONDS` | 600; allowed 5–3600 |
+| `OPENCODE_MCP_MAX_JOBS` | 64; allowed 8–256 |
+| `OPENCODE_MCP_MAX_CONCURRENT` | 8; allowed 1–32, not greater than MAX_JOBS |
+| `OPENCODE_MCP_PERMISSIONS` | JSON native permission rules |
+| `OPENCODE_MCP_LSP` / `OPENCODE_MCP_FORMATTER` | `false`; explicit opt-in for native services |
+
+`OPENCODE_MCP_DEFAULT_DIRECTORY` remains only as a root alias. `OPENCODE_BASE_URL`, server/API-token credentials, default model/agent selection, and shell-backend selection are rejected rather than silently used. `--base-url` / `--opencode` CLI options are removed. See `node dist/index.js --help`.
+
+## Security boundaries
+
+This executes real code and **is not an OS sandbox**. Canonical path checks reject direct traversal and symlink escapes, but cannot make arbitrary shell commands safe or prevent all filesystem races/hardlink/proc access. Search/read permissions are not a comprehensive secret scanner. Run in a dedicated container/VM with a dedicated OS identity, appropriate mounts, resource limits, and network policy. Do not mount production credentials.
+
+The worker receives its own HOME/XDG directories and a small environment allowlist, not model keys, MCP tokens, SSH agents, or other parent secrets. Environment scrubbing is defense in depth, not isolation from other processes running under the same OS user. One shared token is one principal, not multi-tenant access control.
+
+File/web content is untrusted data, not instructions to the client. The bridge itself never delegates to a model, but an explicitly authorized arbitrary shell command can of course run another program or make network requests. LSP/formatter opt-ins can also launch local tools; defaults are off and were used for the integration verification.
+
+## Verification
+
+```sh
+npm run build
+npm run setup:native
+npm test
+npm run typecheck:native
 ```
 
-`test/mock-opencode.mjs`（依存ゼロのモック opencode）を起動し、**curl だけで MCP over HTTP を叩いて** 49 項目を検証します。
+The native integration suite executes real upstream tools on temporary files (not an emulated OpenCode REST server), including MCP stdio and HTTP, permissions, cancellation/timeouts, native TODO database persistence, Unicode, image forwarding, truncation continuation, root/symlink rejection, and disabled delegation/config/plugin/model paths. It includes model-sampling and local provider canaries. Separate unit tests exercise bridge IPC failure/acknowledgement handling. Linux network-isolated verification can additionally run the suite with loopback only and a preinstalled/cached `rg` on PATH.
 
-- v2 API 構成: initialize / tools/list / 各ツール / permission 承認フロー / セッション無し時 400 応答
-- `--legacy` 構成: `/api/shell` と `prompt_async` を 404 にして、旧 API への自動フォールバックを検証
-- `--html-spa` / `--spa-post` 構成: `/api/shell` が Web UI の HTML を 200 で返すビルドでも誤検出しないことを検証（下記の実機バグの回帰テスト）
-
-```text
-===================================
- passed: 49   failed: 0
-===================================
-```
-
-実物の opencode に対する疎通確認は `bash test/smoke-real.sh`（`opencode serve` が起動している必要あり）。
-
-## 実機検証で見つかったバグと修正
-
-モックだけでなく実際の `opencode serve` に繋いだところ、次の不具合を検出して修正しました。
-
-- **現象**: 一部のビルドは未定義のパスに対して Web UI の HTML を **HTTP 200** で返す。そのため `GET /api/shell` が 200 になり、ブリッジが「v2 シェル API あり」と誤検知 → シェル実行が `shell id missing in response` で失敗した。
-- **修正**: 能力検出をステータスコードだけでなく **ボディが本当に JSON か**（`isJsonPayload`）で判定するように変更。さらに `POST /api/shell` が JSON でない応答を返した場合も実行時に legacy ルートへ自動ダウングレードするようにした。
-- **回帰テスト**: モックに `--html-spa` / `--spa-post` モードを追加し、両ケースを e2e に組み込み。
-
-修正後の実機実行結果（`bash test/smoke-real.sh`）:
-
-```json
-{ "ok": true, "capabilities": { "reachable": true, "shellApi": "legacy", "promptAsync": true, "sessionStatusEndpoint": true, "vcsBase": "/api/vcs" } }
-{ "ok": true, "shell_id": "local-90c75649", "api": "legacy", "status": "completed", "exit_code": 0, "output": "real-opencode-ok\nLinux\n" }
-```
-
-## ライセンス
-
-MIT
+This is a breaking replacement of v0.1: no `opencode serve` process, model API key, or agent prompt route is needed. Merging/deploying this change is separate from creating a PR.
