@@ -41,9 +41,11 @@ import { Session } from "@/session/session"
 import { Todo } from "@/session/todo"
 import { MessageID } from "@/session/schema"
 import { Permission } from "@/permission"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 
+type NativeConfig = Effect.Success<ReturnType<Config.Interface["get"]>>
 const options = JSON.parse(process.argv[2]!) as {
-  root: string; permissions: Config.Info["permission"]; lsp: boolean; formatter: boolean
+  root: string; permissions: NativeConfig["permission"]; lsp: boolean; formatter: boolean
 }
 const directory = await realpath(options.root)
 if (dirname(directory) === directory) throw new Error("Filesystem-root workspace is forbidden")
@@ -66,7 +68,7 @@ const profile: Agent.Info = {
   name: "toolbox", description: "Non-reasoning execution context", mode: "primary",
   native: true, options: {}, permission: rules,
 }
-const fixedConfig: Config.Info = {
+const fixedConfig: NativeConfig = {
   lsp: options.lsp ? {} : false, formatter: options.formatter ? {} : false,
   plugin: [], mcp: {}, agent: {}, provider: {}, instructions: [],
   skills: { paths: [], urls: [] }, share: "disabled", autoupdate: false,
@@ -85,21 +87,35 @@ const pluginLayer = Layer.succeed(Plugin.Service, Plugin.Service.of({
   trigger: (_name, _input, output) => Effect.succeed(output),
   list: () => Effect.succeed([]), init: () => Effect.void,
 }))
-const layer = LayerNode.compile(LayerNode.group([
+const graph = LayerNode.group([
   FSUtil.node, Ripgrep.node, CrossSpawnSpawner.node, Truncate.node, Agent.node,
   LSP.node, Instruction.node, Format.node, EventV2Bridge.node, Config.node,
   RuntimeFlags.node, Plugin.node, Git.node, InstanceStore.node, Project.node,
-  Session.node, Todo.node, httpClient,
-]), [
+  Session.node, SessionProjector.node, Todo.node, httpClient,
+])
+const replacements = [
   [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, { run: Effect.void })],
   [httpClient, FetchHttpClient.layer], [Agent.node, agentLayer],
   [Config.node, configLayer], [Plugin.node, pluginLayer],
   [RuntimeFlags.node, RuntimeFlags.layer({
     pure: true, disableDefaultPlugins: true, disableExternalSkills: true,
-    disableClaudeCode: true, disableLspDownload: true, enableQuestionTool: false,
+    disableClaudeCodePrompt: true, disableClaudeCodeSkills: true, disableLspDownload: true, enableQuestionTool: false,
     experimentalBackgroundSubagents: false, experimentalPlanMode: false,
   })],
-])
+] as const
+// Refuse to start if an inference-capable service slips into the actual graph.
+const replaced = new Set(replacements.map(([source]) => source.name))
+const visited = new Set<string>()
+interface GraphNode { name: string; dependencies: readonly GraphNode[] }
+function inspect(node: GraphNode): void {
+  if (visited.has(node.name)) return
+  visited.add(node.name)
+  if (replaced.has(node.name)) return
+  if (/\/(LLM|SessionPrompt|Provider|ModelsDev|Auth|Account|MCP)(?:$|\/)/.test(node.name)) throw new Error(`Forbidden service in toolbox graph: ${node.name}`)
+  for (const dependency of node.dependencies) inspect(dependency)
+}
+inspect(graph)
+const layer = LayerNode.compile(graph, replacements)
 const runtime = ManagedRuntime.make(layer)
 const scope = await Effect.runPromise(Scope.make())
 const state = await runtime.runPromise(Effect.gen(function* () {
@@ -111,6 +127,8 @@ const state = await runtime.runPromise(Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const sessions = yield* Session.Service
     const session = yield* sessions.create({ title: "MCP execution toolbox" })
+    // The native event projector must have persisted the parent before TODO FK writes.
+    yield* sessions.get(session.id)
     const tools = yield* Effect.all([
       ReadTool.pipe(Effect.flatMap(Tool.init)), WriteTool.pipe(Effect.flatMap(Tool.init)),
       EditTool.pipe(Effect.flatMap(Tool.init)), GlobTool.pipe(Effect.flatMap(Tool.init)),
@@ -206,7 +224,8 @@ async function execute(message: { id: string; tool: string; args: Record<string,
         Effect.provideService(InstanceRef, state.instance), Effect.provideService(Scope.Scope, scope),
       ), { signal: controller.signal },
     )
-    if (typeof result.metadata.outputPath === "string") savedOutputs.add(await canonical(result.metadata.outputPath))
+    const outputPath = (result.metadata as Record<string, unknown>).outputPath
+    if (typeof outputPath === "string") savedOutputs.add(await canonical(outputPath))
     send({ type: "result", id: message.id, result })
   } catch (error) {
     send({ type: "error", id: message.id, error: error instanceof Error ? error.message : String(error) })
