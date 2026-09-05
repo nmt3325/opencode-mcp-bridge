@@ -1,167 +1,103 @@
-/**
- * Configuration for the opencode MCP bridge.
- *
- * Every value can be supplied through environment variables so the bridge can
- * run as a systemd unit without a config file.
- */
+import { createHash } from "node:crypto"
+import { homedir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import { z } from "zod"
+
+export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
+export const UPSTREAM = {
+  repository: "https://github.com/anomalyco/opencode.git",
+  version: "1.18.29",
+  commit: "16747470f976aca3d362ad730bcd3fe82ecc2c9a",
+  bun: "1.3.14",
+} as const
+export const NATIVE_TOOL_IDS = ["read", "write", "edit", "glob", "grep", "bash", "webfetch", "todowrite"] as const
+
+const action = z.enum(["allow", "ask", "deny"])
+const permissions = z.record(z.union([action, z.record(action)]))
+export type PermissionConfig = z.infer<typeof permissions>
 export interface BridgeConfig {
-	/** Base URL of `opencode serve`, e.g. http://127.0.0.1:4096 */
-	baseUrl: string
-	basicUser?: string
-	basicPassword?: string
-	bearerToken?: string
-	/** Hard timeout for a single upstream HTTP call. */
-	requestTimeoutMs: number
-	/** Timeout for fire-and-forget calls that intentionally outlive a tool call. */
-	backgroundTimeoutMs: number
-	/** Upper bound for `opencode_wait`, always kept below the MCP client timeout. */
-	waitMaxSeconds: number
-	pollIntervalMs: number
-	maxOutputChars: number
-	defaultDirectory?: string
-	defaultAgent?: string
-	defaultModel?: string
-	denyPatterns: string[]
-	allowPatterns: string[]
-	httpHost: string
-	httpPort: number
-	/** Optional bearer token required by the bridge's own HTTP endpoint. */
-	mcpToken?: string
-	shellDefaultTimeoutSeconds: number
-	/** Which shell route to prefer. "auto" picks the pty whenever the build has one. */
-	shellBackend: "auto" | "pty" | "v2" | "legacy"
-	/** Program the pty route runs the command with. */
-	ptyShell: string
-	/** Scrollback the bridge keeps per pty job, in characters. */
-	ptyBufferChars: number
+  root: string
+  runtimeDir: string
+  stateDir: string
+  bun: string
+  httpHost: string
+  httpPort: number
+  mcpToken?: string
+  waitMs: number
+  jobTimeoutMs: number
+  maxJobs: number
+  maxConcurrent: number
+  permissions: PermissionConfig
+  lsp: boolean
+  formatter: boolean
 }
 
-/**
- * Conservative defaults. Anything matching these never reaches opencode.
- * Override with OPENCODE_MCP_DENY_PATTERNS (comma separated or JSON array).
- */
-export const DEFAULT_DENY_PATTERNS = [
-	"rm -rf /",
-	"rm -rf /*",
-	"rm -fr /",
-	"rm -fr /*",
-	"rm -rf ~",
-	"rm -rf ~/*",
-	"mkfs*",
-	"dd if=* of=/dev/*",
-	"shutdown*",
-	"reboot*",
-	"halt*",
-	"init 0",
-	"chmod -R 777 /*",
-	":(){:|:&};:",
-]
-
-function num(value: string | undefined, fallback: number): number {
-	const parsed = Number(value)
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
+  const value = env[key] === undefined ? fallback : Number(env[key])
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${key} must be an integer between ${min} and ${max}`)
+  return value
 }
-
-function list(value: string | undefined, fallback: string[]): string[] {
-	if (value === undefined) return fallback
-	const trimmed = value.trim()
-	if (trimmed === "") return []
-	if (trimmed.startsWith("[")) {
-		try {
-			const parsed: unknown = JSON.parse(trimmed)
-			if (Array.isArray(parsed)) return parsed.map((item) => String(item))
-		} catch {
-			// fall through to comma separated parsing
-		}
-	}
-	return trimmed
-		.split(",")
-		.map((item) => item.trim())
-		.filter((item) => item.length > 0)
-}
-
-function backend(value: string | undefined): "auto" | "pty" | "v2" | "legacy" {
-	return value === "pty" || value === "v2" || value === "legacy" ? value : "auto"
+function boolean(env: NodeJS.ProcessEnv, key: string): boolean {
+  const value = env[key]
+  if (value === undefined || value === "false" || value === "0") return false
+  if (value === "true" || value === "1") return true
+  throw new Error(`${key} must be true or false`)
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
-	const password = env.OPENCODE_SERVER_PASSWORD
-	return {
-		baseUrl: (env.OPENCODE_BASE_URL ?? "http://127.0.0.1:4096").replace(/\/+$/, ""),
-		basicUser: env.OPENCODE_SERVER_USERNAME ?? (password ? "opencode" : undefined),
-		basicPassword: password,
-		bearerToken: env.OPENCODE_API_TOKEN,
-		requestTimeoutMs: num(env.OPENCODE_MCP_REQUEST_TIMEOUT_MS, 20_000),
-		backgroundTimeoutMs: num(env.OPENCODE_MCP_BACKGROUND_TIMEOUT_MS, 900_000),
-		waitMaxSeconds: Math.min(num(env.OPENCODE_MCP_WAIT_MAX_SECONDS, 45), 50),
-		pollIntervalMs: num(env.OPENCODE_MCP_POLL_INTERVAL_MS, 1_000),
-		maxOutputChars: num(env.OPENCODE_MCP_MAX_OUTPUT_CHARS, 20_000),
-		defaultDirectory: env.OPENCODE_MCP_DEFAULT_DIRECTORY,
-		defaultAgent: env.OPENCODE_MCP_DEFAULT_AGENT,
-		defaultModel: env.OPENCODE_MCP_DEFAULT_MODEL,
-		denyPatterns: list(env.OPENCODE_MCP_DENY_PATTERNS, DEFAULT_DENY_PATTERNS),
-		allowPatterns: list(env.OPENCODE_MCP_ALLOW_PATTERNS, []),
-		httpHost: env.OPENCODE_MCP_HOST ?? "127.0.0.1",
-		httpPort: num(env.OPENCODE_MCP_PORT, 8787),
-		mcpToken: env.OPENCODE_MCP_TOKEN,
-		shellDefaultTimeoutSeconds: num(env.OPENCODE_MCP_SHELL_TIMEOUT_SECONDS, 120),
-		shellBackend: backend(env.OPENCODE_MCP_SHELL_BACKEND),
-		ptyShell: env.OPENCODE_MCP_PTY_SHELL ?? "bash",
-		ptyBufferChars: num(env.OPENCODE_MCP_PTY_BUFFER_CHARS, 1_000_000),
-	}
+  for (const key of ["OPENCODE_BASE_URL", "OPENCODE_SERVER_PASSWORD", "OPENCODE_API_TOKEN", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND"]) {
+    if (env[key]) throw new Error(`${key} was removed: this bridge executes native tools only. See README migration instructions.`)
+  }
+  const directory = env.OPENCODE_MCP_ROOT ?? env.OPENCODE_MCP_DEFAULT_DIRECTORY
+  if (!directory) throw new Error("Set OPENCODE_MCP_ROOT to the workspace directory; implicit filesystem-wide access is not allowed.")
+  const root = resolve(directory)
+  if (dirname(root) === root) throw new Error("The filesystem root cannot be the toolbox workspace")
+  const key = createHash("sha256").update(root).digest("hex").slice(0, 20)
+  const policy = env.OPENCODE_MCP_PERMISSIONS ? permissions.parse(JSON.parse(env.OPENCODE_MCP_PERMISSIONS)) : {}
+  return {
+    root,
+    runtimeDir: resolve(env.OPENCODE_MCP_RUNTIME_DIR ?? join(PACKAGE_ROOT, ".opencode-runtime")),
+    stateDir: resolve(env.OPENCODE_MCP_STATE_DIR ?? join(homedir(), ".local", "state", "opencode-mcp-bridge", key)),
+    bun: env.OPENCODE_MCP_BUN ?? "bun",
+    httpHost: env.OPENCODE_MCP_HOST ?? "127.0.0.1",
+    httpPort: integer(env, "OPENCODE_MCP_PORT", 8787, 1, 65535),
+    mcpToken: env.OPENCODE_MCP_TOKEN,
+    waitMs: integer(env, "OPENCODE_MCP_WAIT_MAX_SECONDS", 45, 0, 50) * 1000,
+    jobTimeoutMs: integer(env, "OPENCODE_MCP_JOB_TIMEOUT_SECONDS", 600, 5, 3600) * 1000,
+    maxJobs: integer(env, "OPENCODE_MCP_MAX_JOBS", 64, 8, 256),
+    maxConcurrent: integer(env, "OPENCODE_MCP_MAX_CONCURRENT", 8, 1, 32),
+    permissions: policy,
+    lsp: boolean(env, "OPENCODE_MCP_LSP"),
+    formatter: boolean(env, "OPENCODE_MCP_FORMATTER"),
+  }
 }
 
-const REGEXP_SPECIAL = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "/"])
-
-/** Glob-ish matcher used for the shell guard (`*` and `?` wildcards, case insensitive). */
-export function wildcardToRegExp(pattern: string): RegExp {
-	let out = "^"
-	for (const ch of pattern) {
-		if (ch === "*") {
-			out += "[\\s\\S]*"
-			continue
-		}
-		if (ch === "?") {
-			out += "[\\s\\S]"
-			continue
-		}
-		if (ch === "\\") {
-			out += "\\\\"
-			continue
-		}
-		out += REGEXP_SPECIAL.has(ch) ? "\\" + ch : ch
-	}
-	return new RegExp(out + "$", "i")
-}
-
-export function wildcardMatch(pattern: string, value: string): boolean {
-	return wildcardToRegExp(pattern).test(value)
-}
-
-export interface GuardResult {
-	allowed: boolean
-	reason?: string
-	matched?: string
-}
-
-/**
- * Bridge side guard. This is a second line of defence: opencode's own
- * `permission` config still applies on the server.
- */
-export function checkCommand(command: string, config: BridgeConfig): GuardResult {
-	const normalized = command.trim().replace(/\s+/g, " ")
-	if (normalized === "") return { allowed: false, reason: "empty command" }
-	for (const pattern of config.denyPatterns) {
-		if (wildcardMatch(pattern, normalized)) {
-			return { allowed: false, reason: "blocked by OPENCODE_MCP_DENY_PATTERNS", matched: pattern }
-		}
-	}
-	if (config.allowPatterns.length > 0) {
-		const hit = config.allowPatterns.find((pattern) => wildcardMatch(pattern, normalized))
-		if (!hit) {
-			return { allowed: false, reason: "command does not match OPENCODE_MCP_ALLOW_PATTERNS" }
-		}
-		return { allowed: true, matched: hit }
-	}
-	return { allowed: true }
+// Do not give the execution worker the MCP token, provider keys, GitHub tokens,
+// SSH agent, NODE_OPTIONS, BUN_OPTIONS, or the caller's existing OpenCode home.
+export function workerEnvironment(config: BridgeConfig, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {}
+  for (const key of ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"]) {
+    if (env[key]) result[key] = env[key]
+  }
+  const home = join(config.stateDir, "home")
+  return {
+    ...result,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_STATE_HOME: join(home, "state"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    APPDATA: join(home, "config"),
+    LOCALAPPDATA: join(home, "data"),
+    TMPDIR: join(home, "tmp"), TEMP: join(home, "tmp"), TMP: join(home, "tmp"),
+    OPENCODE_DISABLE_MODELS_FETCH: "true",
+    OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+    OPENCODE_PURE: "true",
+    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+    OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+    OPENCODE_DISABLE_CLAUDE_CODE: "true",
+    OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
+  }
 }
