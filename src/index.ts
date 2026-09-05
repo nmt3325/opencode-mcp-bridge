@@ -1,182 +1,130 @@
 #!/usr/bin/env node
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http"
-import { randomUUID } from "node:crypto"
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
+import { randomUUID, timingSafeEqual } from "node:crypto"
+import { pathToFileURL } from "node:url"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
 import { loadConfig, type BridgeConfig } from "./config.js"
 import { OpencodeClient } from "./opencodeClient.js"
-import { registerTools } from "./tools.js"
+import { buildMcpServer } from "./tools.js"
+export { buildMcpServer } from "./tools.js"
 
-export const SERVER_NAME = "opencode-mcp-bridge"
-export const SERVER_VERSION = "0.1.0"
-
-export function buildMcpServer(client: OpencodeClient, config: BridgeConfig): McpServer {
-	const server = new McpServer(
-		{ name: SERVER_NAME, version: SERVER_VERSION },
-		{
-			instructions:
-				"Bridge to a running `opencode serve`. Long work never blocks: opencode_start returns a session_id, opencode_wait long polls under the client timeout, opencode_shell returns a shell_id and opencode_shell_output streams it in chunks.",
-		},
-	)
-	registerTools(server, client, config)
-	return server
+export function authorized(req: IncomingMessage, token: string): boolean {
+  const header = req.headers.authorization
+  const alternative = req.headers["x-mcp-token"]
+  const value = typeof header === "string" && header.startsWith("Bearer ") ? header.slice(7) : alternative
+  if (typeof value !== "string") return false
+  const expected = Buffer.from(token), actual = Buffer.from(value)
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
-
+function json(res: ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value)
+  res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" })
+  res.end(body)
+}
 async function readBody(req: IncomingMessage): Promise<unknown> {
-	const chunks: Buffer[] = []
-	for await (const chunk of req) chunks.push(chunk as Buffer)
-	if (chunks.length === 0) return undefined
-	const raw = Buffer.concat(chunks).toString("utf8")
-	if (raw.trim() === "") return undefined
-	return JSON.parse(raw)
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > 8 * 1024 * 1024) throw new Error("Request body exceeds 8 MiB")
+    chunks.push(chunk as Buffer)
+  }
+  const text = Buffer.concat(chunks).toString("utf8")
+  return text.trim() ? JSON.parse(text) : undefined
 }
-
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
-	const body = JSON.stringify(payload)
-	res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) })
-	res.end(body)
+export async function runHttp(client: OpencodeClient, config: BridgeConfig): Promise<() => Promise<void>> {
+  if (!config.mcpToken || config.mcpToken.length < 24) throw new Error("HTTP requires OPENCODE_MCP_TOKEN with at least 24 characters, including on loopback")
+  const transports = new Map<string, { transport: StreamableHTTPServerTransport; touched: number }>()
+  const server = createServer((req, res) => { void (async () => {
+    try {
+      const path = new URL(req.url ?? "/", "http://localhost").pathname
+      if (path === "/healthz") { const ok = client.info().ready === true; json(res, ok ? 200 : 503, { ok, mode: "toolbox-only", version: "0.2.0" }); return }
+      if (path !== "/mcp") { json(res, 404, { error: "not found" }); return }
+      if (!authorized(req, config.mcpToken!)) { json(res, 401, { error: "unauthorized" }); return }
+      if (req.headers.origin) { json(res, 403, { error: "Browser-origin requests are not supported; use an authenticated MCP client" }); return }
+      const body = req.method === "POST" ? await readBody(req) : undefined
+      const id = req.headers["mcp-session-id"]
+      if (Array.isArray(id)) { json(res, 400, { error: "Invalid session header" }); return }
+      let entry = id ? transports.get(id) : undefined
+      if (id && !entry) { json(res, 404, { error: "MCP transport session expired; initialize again. Execution jobs remain available." }); return }
+      if (!entry) {
+        if (req.method !== "POST" || !isInitializeRequest(body)) { json(res, 400, { error: "Initialize an MCP session first" }); return }
+        if (transports.size >= 128) { json(res, 503, { error: "Too many active transport sessions" }); return }
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: randomUUID, enableJsonResponse: true,
+          onsessioninitialized: (session) => { transports.set(session, { transport, touched: Date.now() }) },
+        })
+        await buildMcpServer(client, config).connect(transport)
+        const onclose = transport.onclose
+        transport.onclose = () => { if (transport.sessionId) transports.delete(transport.sessionId); onclose?.() }
+        entry = { transport, touched: Date.now() }
+      }
+      entry.touched = Date.now()
+      await entry.transport.handleRequest(req, res, body)
+    } catch (error) {
+      console.error("[toolbox] request failed:", (error as Error).message)
+      if (!res.headersSent) json(res, 400, { error: (error as Error).message })
+      else res.end()
+    }
+  })() })
+  server.requestTimeout = 65000
+  const reap = setInterval(() => {
+    for (const [id, entry] of transports) if (Date.now() - entry.touched > 30 * 60 * 1000) {
+      transports.delete(id); void entry.transport.close()
+    }
+  }, 60000)
+  reap.unref()
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.httpPort, config.httpHost, resolve) })
+  console.error(`[toolbox] HTTP ready on ${config.httpHost}:${config.httpPort}/mcp`)
+  return async () => {
+    clearInterval(reap)
+    await Promise.allSettled([...transports.values()].map((entry) => entry.transport.close()))
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    await client.stop()
+  }
 }
-
-function authorized(req: IncomingMessage, config: BridgeConfig): boolean {
-	if (!config.mcpToken) return true
-	const header = req.headers.authorization
-	if (typeof header === "string" && header.startsWith("Bearer ") && header.slice(7) === config.mcpToken) return true
-	const alt = req.headers["x-mcp-token"]
-	return typeof alt === "string" && alt === config.mcpToken
+export function parseArgs(argv: string[]): { mode: "stdio" | "http"; overrides: NodeJS.ProcessEnv; help: boolean } {
+  let mode: "stdio" | "http" = "stdio"
+  const overrides: NodeJS.ProcessEnv = {}
+  const keys: Record<string, string> = { "--root": "OPENCODE_MCP_ROOT", "--runtime-dir": "OPENCODE_MCP_RUNTIME_DIR", "--host": "OPENCODE_MCP_HOST", "--port": "OPENCODE_MCP_PORT" }
+  let help = false
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!
+    if (arg === "--stdio" || arg === "--http") mode = arg === "--http" ? "http" : "stdio"
+    else if (arg === "--help" || arg === "-h") help = true
+    else if (keys[arg]) {
+      const value = argv[++index]
+      if (!value || value.startsWith("--")) throw new Error("Missing value for " + arg)
+      overrides[keys[arg]!] = value
+    } else throw new Error("Unknown or removed argument: " + arg)
+  }
+  return { mode, overrides, help }
 }
-
-export async function runHttp(client: OpencodeClient, config: BridgeConfig): Promise<void> {
-	const transports = new Map<string, StreamableHTTPServerTransport>()
-
-	const httpServer = createHttpServer((req, res) => {
-		void (async () => {
-			try {
-				const url = new URL(req.url ?? "/", "http://" + (req.headers.host ?? "localhost"))
-				if (url.pathname === "/healthz") {
-					const capabilities = await client.capabilities(url.searchParams.get("refresh") === "1").catch((error: unknown) => ({
-						error: (error as Error).message,
-					}))
-					sendJson(res, 200, { ok: true, server: SERVER_NAME, version: SERVER_VERSION, opencode: capabilities })
-					return
-				}
-				if (url.pathname !== "/mcp") {
-					sendJson(res, 404, { error: "not found", hint: "the MCP endpoint is POST /mcp" })
-					return
-				}
-				if (!authorized(req, config)) {
-					sendJson(res, 401, { error: "unauthorized", hint: "send Authorization: Bearer $OPENCODE_MCP_TOKEN" })
-					return
-				}
-				const body = req.method === "POST" ? await readBody(req) : undefined
-				const rawSession = req.headers["mcp-session-id"]
-				const sessionId = Array.isArray(rawSession) ? rawSession[0] : rawSession
-				let transport = sessionId ? transports.get(sessionId) : undefined
-				if (!transport) {
-					if (req.method !== "POST" || !isInitializeRequest(body)) {
-						sendJson(res, 400, {
-							jsonrpc: "2.0",
-							id: null,
-							error: { code: -32000, message: "Bad Request: no valid session id, send an initialize request first" },
-						})
-						return
-					}
-					const created: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
-						sessionIdGenerator: () => randomUUID(),
-						enableJsonResponse: true,
-						onsessioninitialized: (id: string) => {
-							transports.set(id, created)
-						},
-					})
-					created.onclose = () => {
-						const id = created.sessionId
-						if (id) transports.delete(id)
-					}
-					await buildMcpServer(client, config).connect(created)
-					transport = created
-				}
-				await transport.handleRequest(req, res, body)
-			} catch (error) {
-				console.error("[opencode-mcp-bridge] request failed:", error)
-				if (!res.headersSent) {
-					sendJson(res, 500, { jsonrpc: "2.0", id: null, error: { code: -32603, message: (error as Error).message } })
-				}
-			}
-		})()
-	})
-
-	await new Promise<void>((resolve) => {
-		httpServer.listen(config.httpPort, config.httpHost, () => {
-			console.error(
-				"[opencode-mcp-bridge] listening on http://" + config.httpHost + ":" + config.httpPort + "/mcp -> " + config.baseUrl,
-			)
-			resolve()
-		})
-	})
-
-	const shutdown = () => {
-		console.error("[opencode-mcp-bridge] shutting down")
-		httpServer.close()
-		process.exit(0)
-	}
-	process.on("SIGINT", shutdown)
-	process.on("SIGTERM", shutdown)
-}
-
-export async function runStdio(client: OpencodeClient, config: BridgeConfig): Promise<void> {
-	const server = buildMcpServer(client, config)
-	await server.connect(new StdioServerTransport())
-	console.error("[opencode-mcp-bridge] stdio transport ready -> " + config.baseUrl)
-}
-
-function parseArgs(argv: string[]): { mode: "http" | "stdio"; overrides: NodeJS.ProcessEnv } {
-	const overrides: NodeJS.ProcessEnv = {}
-	let mode: "http" | "stdio" = "stdio"
-	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i]
-		const next = argv[i + 1]
-		if (arg === "--http") mode = "http"
-		else if (arg === "--stdio") mode = "stdio"
-		else if (arg === "--port" && next) {
-			overrides.OPENCODE_MCP_PORT = next
-			i += 1
-		} else if (arg === "--host" && next) {
-			overrides.OPENCODE_MCP_HOST = next
-			i += 1
-		} else if ((arg === "--base-url" || arg === "--opencode") && next) {
-			overrides.OPENCODE_BASE_URL = next
-			i += 1
-		} else if (arg === "--help" || arg === "-h") {
-			console.log(
-				[
-					"opencode-mcp-bridge",
-					"",
-					"  --http                 serve MCP over streamable HTTP (POST /mcp)",
-					"  --stdio                serve MCP over stdio (default)",
-					"  --port <n>             HTTP port (default 8787)",
-					"  --host <addr>          HTTP bind address (default 127.0.0.1)",
-					"  --base-url <url>       opencode server URL (default http://127.0.0.1:4096)",
-				].join("\n"),
-			)
-			process.exit(0)
-		}
-	}
-	return { mode, overrides }
-}
-
 async function main(): Promise<void> {
-	const { mode, overrides } = parseArgs(process.argv.slice(2))
-	const config = loadConfig({ ...process.env, ...overrides })
-	const client = new OpencodeClient(config)
-	if (mode === "http") await runHttp(client, config)
-	else await runStdio(client, config)
+  const args = parseArgs(process.argv.slice(2))
+  if (args.help) { console.log("opencode-mcp-bridge: native execution toolbox only\n  --stdio | --http\n  --root <workspace>\n  --runtime-dir <pinned-checkout>\n  --host <address> --port <number>\nRun npm run setup:native before the first start. HTTP requires OPENCODE_MCP_TOKEN."); return }
+  const config = loadConfig({ ...process.env, ...args.overrides })
+  if (args.mode === "http" && (!config.mcpToken || config.mcpToken.length < 24)) throw new Error("HTTP requires OPENCODE_MCP_TOKEN with at least 24 characters")
+  const client = new OpencodeClient(config)
+  try {
+    await client.start()
+    let close: () => Promise<void>
+    if (args.mode === "http") close = await runHttp(client, config)
+    else {
+      const server = buildMcpServer(client, config)
+      await server.connect(new StdioServerTransport())
+      close = async () => { await server.close(); await client.stop() }
+      process.stdin.once("end", () => { void close() })
+      console.error("[toolbox] stdio ready")
+    }
+    let closing = false
+    const shutdown = () => { if (closing) return; closing = true; void close().then(() => process.exit(0), () => process.exit(1)) }
+    process.once("SIGINT", shutdown); process.once("SIGTERM", shutdown)
+  } catch (error) { await client.stop(); throw error }
 }
-
-const entry = process.argv[1] ?? ""
-if (entry.endsWith("index.js") || entry.endsWith("opencode-mcp-bridge")) {
-	main().catch((error: unknown) => {
-		console.error("[opencode-mcp-bridge] fatal:", error)
-		process.exit(1)
-	})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main().catch((error: unknown) => { console.error("[toolbox]", (error as Error).message); process.exitCode = 1 })
 }
