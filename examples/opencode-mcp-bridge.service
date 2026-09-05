@@ -1,22 +1,33 @@
 [Unit]
-Description=opencode MCP bridge
-After=network-online.target opencode.service
-Wants=network-online.target
+Description=OpenCode native execution MCP toolbox
+After=network.target
 
 [Service]
 Type=simple
 User=opencode
+Group=opencode
 WorkingDirectory=/opt/opencode-mcp-bridge
-Environment=OPENCODE_BASE_URL=http://127.0.0.1:4096
+# Install the pinned runtime under this service user's ownership.
+Environment=OPENCODE_MCP_ROOT=/srv/opencode-workspace
+Environment=OPENCODE_MCP_RUNTIME_DIR=/opt/opencode-runtime
+Environment=OPENCODE_MCP_STATE_DIR=/var/lib/opencode-mcp-bridge
+Environment=OPENCODE_MCP_BUN=/usr/local/bin/bun
 Environment=OPENCODE_MCP_HOST=127.0.0.1
 Environment=OPENCODE_MCP_PORT=8787
-# EnvironmentFile can hold OPENCODE_MCP_TOKEN and OPENCODE_SERVER_PASSWORD
-EnvironmentFile=-/etc/default/opencode-mcp-bridge
+# Store only OPENCODE_MCP_TOKEN in this root-owned, mode-0600 file.
+EnvironmentFile=/etc/opencode-mcp-bridge.env
 ExecStart=/usr/bin/node /opt/opencode-mcp-bridge/dist/index.js --http
 Restart=on-failure
-RestartSec=3
+RestartSec=5
+TimeoutStopSec=15
+StateDirectory=opencode-mcp-bridge
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/opencode-workspace /var/lib/opencode-mcp-bridge
 
 [Install]
 WantedBy=multi-user.target
