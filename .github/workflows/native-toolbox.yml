@@ -23,6 +23,7 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: npm ci
+      - run: npm run build
       - run: npm run setup:native
       - run: npm run typecheck:native
       - run: npm test

@@ -10,7 +10,7 @@
   "files": ["dist", "runtime", "scripts", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "setup:native": "npm run build && node scripts/setup-native.mjs",
+    "setup:native": "node scripts/setup-native.mjs",
     "typecheck:native": "node scripts/typecheck-native.mjs",
     "start": "node dist/index.js --stdio",
     "start:http": "node dist/index.js --http",
