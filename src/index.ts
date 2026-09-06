@@ -34,13 +34,13 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   const text = Buffer.concat(chunks).toString("utf8")
   return text.trim() ? JSON.parse(text) : undefined
 }
-export async function runHttp(client: OpencodeClient, config: BridgeConfig): Promise<() => Promise<void>> {
+export async function runHttp(client: OpencodeClient, config: BridgeConfig, log: (message: string) => void = console.error): Promise<() => Promise<void>> {
   if (!config.mcpToken || config.mcpToken.length < 24) throw new Error("HTTP requires OPENCODE_MCP_TOKEN with at least 24 characters, including on loopback")
   const transports = new Map<string, { transport: StreamableHTTPServerTransport; touched: number }>()
   const server = createServer((req, res) => { void (async () => {
     try {
       const path = new URL(req.url ?? "/", "http://localhost").pathname
-      if (path === "/healthz") { const ok = client.info().ready === true; json(res, ok ? 200 : 503, { ok, mode: "toolbox-only", version: "0.2.0" }); return }
+      if (path === "/healthz") { const ok = client.info().ready === true; json(res, ok ? 200 : 503, { ok, mode: "toolbox-only", version: "0.3.0" }); return }
       if (path !== "/mcp") { json(res, 404, { error: "not found" }); return }
       if (!authorized(req, config.mcpToken!)) { json(res, 401, { error: "unauthorized" }); return }
       if (req.headers.origin) { json(res, 403, { error: "Browser-origin requests are not supported; use an authenticated MCP client" }); return }
@@ -77,7 +77,7 @@ export async function runHttp(client: OpencodeClient, config: BridgeConfig): Pro
   }, 60000)
   reap.unref()
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(config.httpPort, config.httpHost, resolve) })
-  console.error(`[toolbox] HTTP ready on ${config.httpHost}:${config.httpPort}/mcp`)
+  log(`[toolbox] HTTP ready on ${config.httpHost}:${config.httpPort}/mcp`)
   return async () => {
     clearInterval(reap)
     await Promise.allSettled([...transports.values()].map((entry) => entry.transport.close()))

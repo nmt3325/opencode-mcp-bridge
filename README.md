@@ -1,10 +1,18 @@
-# OpenCode MCP execution toolbox
+# OpenCode Notion chat plugin + MCP execution toolbox
 
-**This bridge is exclusively a toolbox.** Notion AI (or another MCP client) handles reasoning and planning. The bridge runs tools; it does not ask another LLM to do the work. There is no agent/delegation mode or legacy execution fallback.
+**The execution side of this bridge is exclusively a toolbox.** Notion AI (or another MCP client) handles reasoning and planning. The bridge runs tools; it does not ask another LLM to do the work. There is no agent/delegation mode or legacy execution fallback.
 
 ```text
 Notion AI → MCP (stdio / Streamable HTTP) → private Bun worker → actual OpenCode tools
 ```
+
+## Notion AI in the standard OpenCode chat UI (new)
+
+One plugin bundles the Notion provider and the execution MCP. It authenticates with a locally supplied `token_v2`, starts/stops the MCP, registers/reuses its own Notion connection, and displays replies in the unchanged OpenCode chat UI. Notion owns reasoning; the native toolbox owns file execution. The plugin uses fixed all-allow execution while preserving authentication and native path checks.
+
+**[日本語の導入手順・制限](docs/plugin.md)** · **[Live validation](docs/validation.md)**
+
+The public HTTPS endpoint is still user-configured. Normal OpenCode session history remains local, with a persistent Notion conversation mapping. The existing standalone CLI and its default approval behavior remain available below.
 
 ## What is native, and what belongs to the bridge?
 
@@ -16,7 +24,7 @@ The worker has a fixed non-inference execution profile and fixed configuration/p
 
 Pinned upstream: **OpenCode v1.18.29**, commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a`, **Bun 1.3.14**. Internal APIs are not a stable upstream public execution API, so upgrades must be intentional and retested.
 
-## Install
+## Standalone toolbox installation
 
 Requirements: Node.js 22+, npm, Git, and **Bun 1.3.14**. Linux is the verified platform. A standalone `opencode` executable does not expose the internal modules and is not sufficient.
 
@@ -47,7 +55,7 @@ export OPENCODE_MCP_TOKEN='<a strong random token of at least 24 characters>'
 npm run start:http
 ```
 
-Connect the client to `http://127.0.0.1:8787/mcp` with `Authorization: Bearer <token>` (or `x-mcp-token`). Authentication is required even on loopback. `/healthz` contains only health/mode/version. Browser Origin requests are rejected. For remote Notion connections, deploy behind HTTPS and configure authentication in Notion's connection UI; never paste secrets into prompts. This repository does not deploy or connect an endpoint automatically.
+Connect the client to `http://127.0.0.1:8787/mcp` with `Authorization: Bearer <token>` (or `x-mcp-token`). Authentication is required even on loopback. `/healthz` contains only health/mode/version. Browser Origin requests are rejected. For remote Notion connections, deploy behind HTTPS and configure authentication in Notion's connection UI; never paste secrets into prompts. Standalone mode does not deploy or register an endpoint automatically. The plugin manages its own connection but still requires user-provided public HTTPS.
 
 ## Tools
 

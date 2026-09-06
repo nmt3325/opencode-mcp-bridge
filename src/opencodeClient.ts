@@ -30,7 +30,7 @@ export class OpencodeClient {
   private stopping = false
   private readyResolve?: () => void
   private readyReject?: (error: Error) => void
-  constructor(readonly config: BridgeConfig) { this.changed.setMaxListeners(128) }
+  constructor(readonly config: BridgeConfig, private readonly log: (chunk: Buffer) => void = chunk => { process.stderr.write(chunk) }) { this.changed.setMaxListeners(128) }
 
   async start(): Promise<void> {
     if (this.started) throw new Error("Native worker already started")
@@ -68,7 +68,7 @@ export class OpencodeClient {
     this.child = spawn(this.config.bun, [entry, JSON.stringify({ root: this.config.root, permissions: this.config.permissions, lsp: this.config.lsp, formatter: this.config.formatter })], {
       cwd: join(this.config.runtimeDir, "packages/opencode"), env, stdio: ["pipe", "pipe", "pipe"],
     })
-    this.child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk))
+    this.child.stderr.on("data", this.log)
     this.child.stdout.setEncoding("utf8")
     let buffer = ""
     this.child.stdout.on("data", (chunk: string) => {
