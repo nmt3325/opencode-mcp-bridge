@@ -1,23 +1,20 @@
-import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process"
-import { createHash, randomUUID } from "node:crypto"
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdir, readFile, realpath, stat } from "node:fs/promises"
+import { mkdir, realpath, stat } from "node:fs/promises"
 import { dirname, isAbsolute, join, relative } from "node:path"
-import { promisify } from "node:util"
 import { PACKAGE_ROOT, UPSTREAM, workerEnvironment, type BridgeConfig } from "./config.js"
 import { nativeCatalog } from "./modelTools.js"
 import { isTerminal, type JobView, type NativeTool } from "./protocol.js"
 
-const run = promisify(execFile)
 const FRAME_LIMIT = 16 * 1024 * 1024
 interface Job extends JobView { timer?: NodeJS.Timeout; cancelReason?: string; bytes: number }
 function inside(root: string, target: string): boolean {
   const path = relative(root, target)
   return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith("../") && !path.startsWith("..\\"))
 }
-const digest = (value: Buffer) => createHash("sha256").update(value).digest("hex")
 
-// Private IPC client for an upstream-native execution worker. No OpenCode HTTP
+// Private IPC client for a standalone vendored-tool worker. No OpenCode HTTP
 // client, session prompts, agent routing, model selection or backend fallback.
 export class OpencodeClient {
   private child?: ChildProcessWithoutNullStreams
@@ -38,35 +35,18 @@ export class OpencodeClient {
     this.config.root = await realpath(this.config.root)
     if (!(await stat(this.config.root)).isDirectory() || dirname(this.config.root) === this.config.root) throw new Error("Invalid workspace root")
     if (dirname(this.config.stateDir) === this.config.stateDir) throw new Error("State directory must be a dedicated private folder")
-    if (inside(this.config.root, this.config.runtimeDir) || inside(this.config.root, this.config.stateDir)) throw new Error("Runtime and state directories must be outside the editable workspace")
+    if (inside(this.config.root, this.config.stateDir) || inside(this.config.root, await realpath(PACKAGE_ROOT))) throw new Error("Package and state directories must be outside the editable workspace")
     await mkdir(this.config.stateDir, { recursive: true, mode: 0o700 })
     this.config.stateDir = await realpath(this.config.stateDir)
     if (inside(this.config.root, this.config.stateDir)) throw new Error("State directory resolves inside the editable workspace")
     if (process.platform !== "win32" && ((await stat(this.config.stateDir)).mode & 0o077)) throw new Error("State directory must be private (mode 0700); do not use a shared or general-purpose folder")
     for (const name of ["home", "home/tmp"]) await mkdir(join(this.config.stateDir, name), { recursive: true, mode: 0o700 })
     const env = workerEnvironment(this.config)
-    const execute = (command: string, args: string[]) => run(command, args, { env, timeout: 20000, maxBuffer: 1024 * 1024 })
-    try {
-      this.config.runtimeDir = await realpath(this.config.runtimeDir)
-      if (inside(this.config.root, this.config.runtimeDir)) throw new Error("Runtime resolves inside the editable workspace")
-      const version = (await execute(this.config.bun, ["--version"])).stdout.trim()
-      if (version !== UPSTREAM.bun) throw new Error(`Expected Bun ${UPSTREAM.bun}, got ${version}`)
-      const head = (await execute("git", ["-C", this.config.runtimeDir, "rev-parse", "HEAD"])).stdout.trim()
-      if (head !== UPSTREAM.commit) throw new Error("OpenCode checkout is not at the supported commit")
-      await execute("git", ["-C", this.config.runtimeDir, "diff", "--quiet", "--no-ext-diff", "HEAD", "--"])
-      for (const name of ["entry.ts", "native-worker.ts"]) {
-        const source = await readFile(join(PACKAGE_ROOT, "runtime", name))
-        const installed = await readFile(join(this.config.runtimeDir, "packages/opencode/.mcp-toolbox", name))
-        if (digest(source) !== digest(installed)) throw new Error("Native adapter is out of date")
-      }
-    } catch (error) {
-      throw new Error(`Native runtime unavailable: ${(error as Error).message}. Run npm run setup:native; there is no legacy or LLM fallback.`)
-    }
     const ready = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject })
     const timer = setTimeout(() => this.fail(new Error("Native runtime startup timed out")), 30000)
-    const entry = join(this.config.runtimeDir, "packages/opencode/.mcp-toolbox/entry.ts")
-    this.child = spawn(this.config.bun, [entry, JSON.stringify({ root: this.config.root, permissions: this.config.permissions, lsp: this.config.lsp, formatter: this.config.formatter })], {
-      cwd: join(this.config.runtimeDir, "packages/opencode"), env, stdio: ["pipe", "pipe", "pipe"],
+    const entry = join(PACKAGE_ROOT, "dist/runtime/worker.js")
+    this.child = spawn(process.execPath, [entry, JSON.stringify({ root: this.config.root, stateDir: this.config.stateDir, permissions: this.config.permissions, ripgrep: this.config.ripgrep })], {
+      cwd: this.config.root, env, stdio: ["pipe", "pipe", "pipe"],
     })
     this.child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk))
     this.child.stdout.setEncoding("utf8")
@@ -166,7 +146,7 @@ export class OpencodeClient {
     return this.catalog
   }
   info(): Record<string, unknown> {
-    return { mode: "toolbox-only", implementation: "upstream-native", llm_delegation: false, ready: !!this.catalog.length && !this.fatal,
+    return { mode: "toolbox-only", implementation: "vendored-tools", runtime: "node", opencode_installation_required: false, llm_delegation: false, ready: !!this.catalog.length && !this.fatal,
       upstream: UPSTREAM, directory: this.config.root, tools: this.catalog.map((tool) => tool.name) }
   }
   list(): JobView[] {

@@ -2,11 +2,13 @@
   "mcpServers": {
     "opencode-toolbox": {
       "command": "node",
-      "args": ["/absolute/path/to/opencode-mcp-bridge/dist/index.js", "--stdio"],
+      "args": [
+        "/absolute/path/to/opencode-mcp-bridge/dist/index.js",
+        "--stdio"
+      ],
       "env": {
         "OPENCODE_MCP_ROOT": "/absolute/path/to/workspace",
-        "OPENCODE_MCP_RUNTIME_DIR": "/absolute/path/to/pinned-opencode",
-        "OPENCODE_MCP_BUN": "/absolute/path/to/bun"
+        "OPENCODE_MCP_STATE_DIR": "/absolute/path/to/private-state"
       }
     }
   }

@@ -14,7 +14,7 @@ function pending(client, id = "job") {
 test("root and removed agent configuration fail closed", () => {
   assert.throws(() => loadConfig({}), /OPENCODE_MCP_ROOT/)
   assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/" }), /filesystem root/)
-  for (const key of ["OPENCODE_BASE_URL", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND"]) {
+  for (const key of ["OPENCODE_BASE_URL", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND", "OPENCODE_MCP_RUNTIME_DIR", "OPENCODE_MCP_BUN"]) {
     assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/workspace", [key]: "removed" }), /removed/)
   }
 })
@@ -22,8 +22,9 @@ test("configuration bounds and native permission shapes are validated", () => {
   assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/workspace", OPENCODE_MCP_WAIT_MAX_SECONDS: "51" }), /integer/)
   assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/workspace", OPENCODE_MCP_MAX_JOBS: "8", OPENCODE_MCP_MAX_CONCURRENT: "9" }), /must not exceed/)
   assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/workspace", OPENCODE_MCP_PERMISSIONS: '{"edit":"sometimes"}' }))
-  assert.equal(configuration().lsp, false)
-  assert.equal(configuration().formatter, false)
+  assert.equal(configuration().ripgrep, "rg")
+  assert.equal(configuration().runtimeDir, undefined)
+  assert.equal(configuration().bun, undefined)
 })
 test("worker environment excludes parent credentials and injection flags", () => {
   const env = workerEnvironment(configuration(), { PATH: "/bin", OPENAI_API_KEY: "example", OPENCODE_MCP_TOKEN: "example", SSH_AUTH_SOCK: "/example", NODE_OPTIONS: "--require=example", BUN_OPTIONS: "example", HOME: "/parent" })
@@ -83,4 +84,9 @@ test("a newly finished job is not immediately evicted behind active jobs", () =>
   for (let index = 0; index < 8; index++) pending(client, String(index))
   client.receive({ type: "result", id: "7", result: { title: "new result", output: "kept", metadata: {} } })
   assert.equal(client.snapshot("7").result.output, "kept")
+})
+
+test("standalone CLI rejects runtime and application-service options", () => {
+  assert.throws(() => parseArgs(["--runtime-dir", "/old/runtime"]), /removed/)
+  for (const key of ["OPENCODE_MCP_LSP", "OPENCODE_MCP_FORMATTER"]) assert.throws(() => loadConfig({ OPENCODE_MCP_ROOT: "/workspace", [key]: "true" }), /removed/)
 })

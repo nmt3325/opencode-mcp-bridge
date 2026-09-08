@@ -40,7 +40,7 @@ export async function runHttp(client: OpencodeClient, config: BridgeConfig): Pro
   const server = createServer((req, res) => { void (async () => {
     try {
       const path = new URL(req.url ?? "/", "http://localhost").pathname
-      if (path === "/healthz") { const ok = client.info().ready === true; json(res, ok ? 200 : 503, { ok, mode: "toolbox-only", version: "0.2.0" }); return }
+      if (path === "/healthz") { const ok = client.info().ready === true; json(res, ok ? 200 : 503, { ok, mode: "toolbox-only", version: "0.3.0" }); return }
       if (path !== "/mcp") { json(res, 404, { error: "not found" }); return }
       if (!authorized(req, config.mcpToken!)) { json(res, 401, { error: "unauthorized" }); return }
       if (req.headers.origin) { json(res, 403, { error: "Browser-origin requests are not supported; use an authenticated MCP client" }); return }
@@ -89,7 +89,7 @@ export async function runHttp(client: OpencodeClient, config: BridgeConfig): Pro
 export function parseArgs(argv: string[]): { mode: "stdio" | "http"; overrides: NodeJS.ProcessEnv; help: boolean } {
   let mode: "stdio" | "http" = "stdio"
   const overrides: NodeJS.ProcessEnv = {}
-  const keys: Record<string, string> = { "--root": "OPENCODE_MCP_ROOT", "--runtime-dir": "OPENCODE_MCP_RUNTIME_DIR", "--host": "OPENCODE_MCP_HOST", "--port": "OPENCODE_MCP_PORT" }
+  const keys: Record<string, string> = { "--root": "OPENCODE_MCP_ROOT", "--host": "OPENCODE_MCP_HOST", "--port": "OPENCODE_MCP_PORT" }
   let help = false
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index]!
@@ -105,7 +105,7 @@ export function parseArgs(argv: string[]): { mode: "stdio" | "http"; overrides: 
 }
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  if (args.help) { console.log("opencode-mcp-bridge: native execution toolbox only\n  --stdio | --http\n  --root <workspace>\n  --runtime-dir <pinned-checkout>\n  --host <address> --port <number>\nRun npm run setup:native before the first start. HTTP requires OPENCODE_MCP_TOKEN."); return }
+  if (args.help) { console.log("opencode-mcp-bridge: native execution toolbox only\n  --stdio | --http\n  --root <workspace>\n  --host <address> --port <number>\nNo OpenCode or Bun installation is required. HTTP requires OPENCODE_MCP_TOKEN."); return }
   const config = loadConfig({ ...process.env, ...args.overrides })
   if (args.mode === "http" && (!config.mcpToken || config.mcpToken.length < 24)) throw new Error("HTTP requires OPENCODE_MCP_TOKEN with at least 24 characters")
   const client = new OpencodeClient(config)

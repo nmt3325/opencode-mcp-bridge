@@ -1,29 +1,50 @@
 {
   "name": "opencode-mcp-bridge",
-  "version": "0.2.0",
-  "description": "Execution-only MCP toolbox using the actual pinned OpenCode tool implementations, without LLM delegation",
+  "version": "0.3.0",
+  "description": "Standalone MCP server with extracted OpenCode execution tools; no OpenCode installation, Bun, chat UI or model runtime",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "opencode-mcp-bridge": "dist/index.js" },
-  "engines": { "node": ">=22" },
-  "files": ["dist", "runtime", "scripts", "README.md", "LICENSE"],
+  "bin": {
+    "opencode-mcp-bridge": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "setup:native": "node scripts/setup-native.mjs",
-    "typecheck:native": "node scripts/typecheck-native.mjs",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "start": "node dist/index.js --stdio",
     "start:http": "node dist/index.js --http",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
-    "prepack": "npm run build"
+    "prepack": "npm run build && npm run verify:vendor",
+    "verify:vendor": "node scripts/verify-vendor.mjs",
+    "test:package": "node scripts/test-package.mjs"
   },
-  "keywords": ["mcp", "opencode", "execution-toolbox", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "opencode",
+    "execution-toolbox",
+    "model-context-protocol"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "effect": "4.0.0-beta.83",
+    "diff": "8.0.2",
+    "htmlparser2": "8.0.2",
+    "turndown": "7.2.0",
+    "mime-types": "3.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "@types/turndown": "5.0.5",
+    "@types/mime-types": "3.0.1"
   }
 }

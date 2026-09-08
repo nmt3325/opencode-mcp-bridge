@@ -1,121 +1,145 @@
-# OpenCode MCP execution toolbox
+# OpenCode tools — standalone MCP server
 
-**This bridge is exclusively a toolbox.** Notion AI (or another MCP client) handles reasoning and planning. The bridge runs tools; it does not ask another LLM to do the work. There is no agent/delegation mode or legacy execution fallback.
+OpenCode's file-editing and execution tools, extracted into an ordinary **Node.js MCP server**. **No OpenCode installation or source checkout, Bun, chat UI, agent loop, model provider or API key is required.** The MCP client does the reasoning; this server executes the selected operation.
+
+Version **0.3.0** vendors the relevant tool leaves from OpenCode **v1.18.29**, commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a` (MIT). This is a maintained extraction with explicit adapters, **not** a claim that the entire OpenCode runtime runs unchanged. See [provenance and adaptation notes](vendor/opencode/README.md).
 
 ```text
-Notion AI → MCP (stdio / Streamable HTTP) → private Bun worker → actual OpenCode tools
+MCP client → stdio / authenticated Streamable HTTP
+           → bounded jobs + permission controls
+           → Node worker → extracted tools → files / processes / HTTP
 ```
 
-## What is native, and what belongs to the bridge?
-
-The worker imports `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`, `ShellTool`, `WebFetchTool`, and `TodoWriteTool` from the **unchanged, pinned OpenCode source checkout**. It initializes them with `Tool.init`, exports their descriptions/input schemas with `ToolJsonSchema.fromTool`, and calls their native `execute` implementations.
-
-File reading, writing, replacement, ripgrep search, globbing, shell execution, HTML conversion, native truncation, and TODO storage are **not reimplemented here**. The bridge only supplies the execution context, transport, job lifecycle, path checks, and permission confirmation transport. Native permission matching uses OpenCode's `Permission.fromConfig/merge/evaluate`.
-
-The worker has a fixed non-inference execution profile and fixed configuration/plugin services. It does not initialize model/provider discovery, user/project plugins, MCP clients, agent generation, `LLM`, or `SessionPrompt`. A startup dependency-graph check rejects inference-capable services. A native session and native session projector provide the real storage context needed by file timestamps and TODOs; that is bookkeeping, not a model conversation.
-
-Pinned upstream: **OpenCode v1.18.29**, commit `16747470f976aca3d362ad730bcd3fe82ecc2c9a`, **Bun 1.3.14**. Internal APIs are not a stable upstream public execution API, so upgrades must be intentional and retested.
-
-## Install
-
-Requirements: Node.js 22+, npm, Git, and **Bun 1.3.14**. Linux is the verified platform. A standalone `opencode` executable does not expose the internal modules and is not sufficient.
-
-```sh
-npm ci
-npm run build
-# Install Bun 1.3.14 beforehand, then:
-npm run setup:native
-```
-
-Setup clones the pinned upstream source to `.opencode-runtime`, installs its frozen workspace dependencies with lifecycle scripts disabled, and copies only this repository's small adapter into an untracked `.mcp-toolbox` directory. It does not modify upstream tool implementations. It refuses an existing checkout at a different commit or with tracked modifications.
-
-At startup the bridge checks the Bun version, upstream Git commit, clean tracked source, and adapter hashes. Missing or incompatible runtime is an error, never a fallback to an agent or local replacement implementation. Keep the runtime and state directories **outside the editable workspace**. Install the runtime under the service user's ownership so Git's ownership checks succeed.
-
-```sh
-export OPENCODE_MCP_ROOT=/absolute/path/to/workspace
-# Optional: defaults to .opencode-runtime beside this package
-export OPENCODE_MCP_RUNTIME_DIR=/absolute/path/to/pinned-opencode
-# Optional: override the Bun executable
-export OPENCODE_MCP_BUN=/absolute/path/to/bun
-npm start
-```
-
-For HTTP:
-
-```sh
-export OPENCODE_MCP_TOKEN='<a strong random token of at least 24 characters>'
-npm run start:http
-```
-
-Connect the client to `http://127.0.0.1:8787/mcp` with `Authorization: Bearer <token>` (or `x-mcp-token`). Authentication is required even on loopback. `/healthz` contains only health/mode/version. Browser Origin requests are rejected. For remote Notion connections, deploy behind HTTPS and configure authentication in Notion's connection UI; never paste secrets into prompts. This repository does not deploy or connect an endpoint automatically.
+There is no `opencode serve`, OpenCode HTTP client, runtime download, SQLite session database, project plugin loading, model inference, sampling, task/agent delegation, or chat endpoint.
 
 ## Tools
 
-Native names: `read`, `write`, `edit`, `glob`, `grep`, `bash`, `webfetch`, `todowrite`.
-
-Their schemas come directly from the running pinned upstream tools. Do not use the old mirrored schemas. For example, native `bash` requires `command` (not a bridge-specific `description`); `read` uses one-based `offset`; `todowrite` entries use `content`, `status`, and `priority`.
-
-Control tools:
-
-| Tool | Purpose |
+| Tool | Operation |
 | --- | --- |
-| `opencode_native_info` | Runtime pin, toolbox purpose, available native tools |
-| `opencode_job_list` | Bounded job summaries |
-| `opencode_job_result` | Retrieve a job; optionally wait up to 50 seconds |
-| `opencode_job_cancel` | Cancel a pending/running job |
-| `opencode_permissions_pending` | Outstanding native permission requests |
-| `opencode_permission_reply` | Approve once or reject a specific job/request pair |
+| `read` | Read numbered text, paginated directories, images or PDFs |
+| `write` | Create or intentionally replace a file |
+| `edit` | OpenCode's exact/fuzzy string replacement and diff logic |
+| `apply_patch` | Add, update, delete and move files using OpenCode's patch parser |
+| `glob` | Find files by glob pattern |
+| `grep` | Search file contents using ripgrep |
+| `bash` | Execute a command, returning actual output and exit status |
+| `webfetch` | Fetch HTTP(S); return text, Markdown, HTML or an image |
+| `todowrite` | Update a small JSON task list, shared by clients of this server process |
 
-No `opencode_start`, agent-session management, prompt/message/command forwarding, `task`, question workflow, MCP sampling, or legacy `opencode_shell*` route is exposed. Unknown names fail without starting work.
+Tools retain their OpenCode input shapes where applicable. `apply_patch` takes `patchText`. Relative paths resolve inside the configured workspace. `bash.timeout` is **milliseconds**; `webfetch.timeout` is **seconds**, positive and at most 120. File reads have the original 2,000-line / 50 KiB output window; images/PDFs are limited to 5 MiB. Web response bodies are capped at 5 MiB while streaming.
+
+## Install and run
+
+Requirements: **Node.js 22+**, npm, and **ripgrep (`rg`)** for `glob`/`grep`. POSIX command execution uses `/bin/bash`; Windows uses `cmd.exe` with best-effort process-tree cancellation. CI exercises Linux with Node 22 and 24.
+
+Install ripgrep using your OS package manager (for example, `sudo apt-get install ripgrep` or `brew install ripgrep`). The server never downloads executables on startup. Set `OPENCODE_MCP_RG` to an absolute binary path if it is not on `PATH`.
+
+```bash
+git clone https://github.com/nmt3325/opencode-mcp-bridge.git
+cd opencode-mcp-bridge
+npm ci --ignore-scripts
+npm run build
+
+# Use a separate directory for the files you want to edit.
+mkdir -p /tmp/toolbox-workspace
+OPENCODE_MCP_ROOT=/tmp/toolbox-workspace node dist/index.js
+```
+
+The clone above is **this server**, not OpenCode. Git is not needed to run a built package. `npm pack` includes the compiled worker, tool implementations, descriptions, attribution and license; it does not include or fetch an OpenCode workspace.
+
+### stdio client configuration
+
+```json
+{
+  "mcpServers": {
+    "opencode-tools": {
+      "command": "node",
+      "args": ["/opt/opencode-mcp-bridge/dist/index.js"],
+      "env": {
+        "OPENCODE_MCP_ROOT": "/srv/workspace",
+        "OPENCODE_MCP_STATE_DIR": "/var/lib/opencode-mcp"
+      }
+    }
+  }
+}
+```
+
+### Streamable HTTP
+
+```bash
+export OPENCODE_MCP_ROOT=/srv/workspace
+export OPENCODE_MCP_TOKEN="$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
+node dist/index.js --http
+# /mcp on 127.0.0.1:8787; supply Authorization: Bearer <token>
+```
+
+`x-mcp-token` is also accepted. Tokens must be at least 24 characters. Browser-Origin requests are rejected. `/health` contains no paths or tool data. Keep the default loopback binding or put the service behind authenticated TLS; never publish it as an unauthenticated command runner. Example configurations are in [`examples/`](examples/).
 
 ## Permissions and jobs
 
-Default policy allows `read` (with `.env`-style reads requiring confirmation), `glob`, `grep`, and `todowrite`. `write`/`edit`, `bash`, and `webfetch` require a decision. Native write/edit request the `edit` permission. External-directory, task, and question permissions are permanently denied. An operator may supply explicit native permission rules using `OPENCODE_MCP_PERMISSIONS`; there is no automatic blanket approval.
+Reads/search/TODO updates are normally allowed. `.env` reads ask, while `.env.example` is allowed. File mutations (including patches), shell commands and web requests ask by default. Filesystem escape requests and delegation permissions are always denied.
 
-A call returns a structured job with `job_id` and one of `running`, `awaiting_permission`, `cancelling`, `completed`, `failed`, or `cancelled`. Keep that ID instead of repeating the original operation. When awaiting permission, display the native request and use `opencode_permission_reply` with `job_id`, `permission_id`, and `reply: "once"` or `"reject"`. Approval is limited to that request; rejecting one job does not reject another.
+`OPENCODE_MCP_PERMISSIONS` accepts an operator-controlled JSON map. Example:
 
-A bounded wait returning `running` is **not cancellation**. Poll `opencode_job_result` for the same job. Explicit cancellation and job deadlines propagate to native execution. There are no automatic retries, worker restarts, or duplicate command fallbacks. Native shell exit status is in `result.metadata.exit`; a completed execution can have a nonzero command exit code.
+```json
+{
+  "edit": "ask",
+  "bash": "ask",
+  "webfetch": { "*": "ask", "https://docs.example.com/*": "allow" }
+}
+```
 
-Native output/metadata/diffs and data-URL attachments are preserved. If native truncation returns `metadata.outputPath`, `read` can follow that exact registered output file; this does not grant access to the rest of private state. Image attachments are forwarded as MCP images and other data-URL attachments as resources.
+Values are `allow`, `ask`, `deny`, or an ordered pattern-to-action map. Defaults are evaluated first, then overrides; the **last matching rule wins**. The extracted wildcard matcher supports `*` and `?`. `bash` patterns match the **whole command**, not an OpenCode AST. A compound command containing shell operators/substitution is never automatically allowed by a pattern rule: it asks again. Only explicit `"bash":"allow"` opts into blanket shell execution. Old per-subcommand rules must be reviewed when migrating.
 
-One bridge process serves one workspace and one authenticated principal. HTTP transport reconnection does not lose jobs because the native worker belongs to the bridge, not an HTTP transport session. Job/results are bounded, in-memory, and lost on bridge restart. Native TODO state uses an OpenCode session in private SQLite storage; a new bridge process creates a new execution session.
+A tool call can return `running` or `awaiting_permission`. That is **not completion** and must never cause the caller to execute the operation again.
+
+- `opencode_job_result`: poll the same `job_id` (`wait_seconds`: 0–50).
+- `opencode_permissions_pending`: inspect pending requests.
+- `opencode_permission_reply`: reply `once` or `reject` using the matching job and permission IDs.
+- `opencode_job_cancel`: cancel and wait for process cleanup.
+- `opencode_job_list`: inspect retained jobs.
+- `opencode_native_info`: compatibility name; reports `implementation: "vendored-tools"`, the source pin and the tool catalog.
+
+Jobs survive HTTP transport reconnects, not a server restart. Commands are never replayed automatically. Shell output uses a bounded preview and saved output file, with a **64 MiB capture ceiling** that terminates excessive output. Search subprocess output has an 8 MiB ceiling and a 60-second timeout; refine broad searches if they exceed it. Saved output can be read only through the exact returned path, not by browsing private state directories. Disk outputs remain in the state directory for operator-managed retention; the in-memory job limits do not constitute a disk quota.
 
 ## Configuration
 
-| Variable | Default / meaning |
+| Variable | Default / purpose |
 | --- | --- |
-| `OPENCODE_MCP_ROOT` | Required, explicit workspace root; filesystem root is refused |
-| `OPENCODE_MCP_RUNTIME_DIR` | Package-local `.opencode-runtime` |
-| `OPENCODE_MCP_STATE_DIR` | Private per-root directory under `~/.local/state/opencode-mcp-bridge` |
-| `OPENCODE_MCP_BUN` | `bun` |
-| `OPENCODE_MCP_HOST` / `OPENCODE_MCP_PORT` | `127.0.0.1` / `8787` |
-| `OPENCODE_MCP_TOKEN` | Required for HTTP, at least 24 characters |
-| `OPENCODE_MCP_WAIT_MAX_SECONDS` | 45; allowed 0–50 |
-| `OPENCODE_MCP_JOB_TIMEOUT_SECONDS` | 600; allowed 5–3600 |
-| `OPENCODE_MCP_MAX_JOBS` | 64; allowed 8–256 |
-| `OPENCODE_MCP_MAX_CONCURRENT` | 8; allowed 1–32, not greater than MAX_JOBS |
-| `OPENCODE_MCP_PERMISSIONS` | JSON native permission rules |
-| `OPENCODE_MCP_LSP` / `OPENCODE_MCP_FORMATTER` | `false`; explicit opt-in for native services |
+| `OPENCODE_MCP_ROOT` | Required editable directory; `DEFAULT_DIRECTORY` remains an alias |
+| `OPENCODE_MCP_STATE_DIR` | Private platform state directory, outside the workspace |
+| `OPENCODE_MCP_RG` | `rg`; executable for search tools |
+| `OPENCODE_MCP_PERMISSIONS` | JSON operator policy; defaults described above |
+| `OPENCODE_MCP_WAIT_SECONDS` | 45; initial bounded wait (0–50) |
+| `OPENCODE_MCP_JOB_TIMEOUT_SECONDS` | 600; job limit (5–3600), including permission wait |
+| `OPENCODE_MCP_MAX_JOBS` | 64; retained jobs (8–256), additionally bounded to 32 MiB in memory |
+| `OPENCODE_MCP_MAX_CONCURRENT_JOBS` | 8; active jobs (1–32, no greater than max jobs) |
+| `OPENCODE_MCP_HOST`, `OPENCODE_MCP_PORT` | `127.0.0.1`, `8787` |
+| `OPENCODE_MCP_TOKEN` | Required only for HTTP |
 
-`OPENCODE_MCP_DEFAULT_DIRECTORY` remains only as a root alias. `OPENCODE_BASE_URL`, server/API-token credentials, default model/agent selection, and shell-backend selection are rejected rather than silently used. `--base-url` / `--opencode` CLI options are removed. See `node dist/index.js --help`.
+The package and private state must be outside the editable root; using the filesystem root is forbidden. File operations canonicalize paths and reject symlink escapes. Writes verify file contents/mode again after approval and use same-directory atomic replacement. A changed file causes a conflict instead of silently overwriting someone else's edit. A multi-file patch is **not a transaction**: all hunks are prevalidated, but an I/O failure/cancellation during application can leave partial changes; inspect files and progress before retrying.
 
-## Security boundaries
+**This is not an OS sandbox.** An approved shell command can access anything permitted to its OS account, including outside the workspace. Untrusted commands require a container/VM, unprivileged account, restricted mounts and network policy. The worker gets a private HOME/XDG/TMP environment and does not inherit model keys, GitHub tokens, SSH agents, MCP tokens or Node/Bun injection flags from the parent. This reduces accidental exposure but does not isolate an approved process from the host filesystem or network.
 
-This executes real code and **is not an OS sandbox**. Canonical path checks reject direct traversal and symlink escapes, but cannot make arbitrary shell commands safe or prevent all filesystem races/hardlink/proc access. Search/read permissions are not a comprehensive secret scanner. Run in a dedicated container/VM with a dedicated OS identity, appropriate mounts, resource limits, and network policy. Do not mount production credentials.
+## Migration from 0.2
 
-The worker receives its own HOME/XDG directories and a small environment allowlist, not model keys, MCP tokens, SSH agents, or other parent secrets. Environment scrubbing is defense in depth, not isolation from other processes running under the same OS user. One shared token is one principal, not multi-tenant access control.
+- Delete `setup:native` / `typecheck:native` from deployment steps. There is no upstream checkout to provision.
+- Remove `OPENCODE_MCP_RUNTIME_DIR`, `OPENCODE_MCP_BUN` and `--runtime-dir`; they are rejected instead of selecting a fallback.
+- LSP, formatter, provider/model and shell-backend switches are removed. No tool implicitly loads application configuration, plugins, AGENTS instructions, formatters or language servers.
+- Existing TODO/session databases are not imported. Each worker owns a small private JSON task list; no chat history or OpenCode database is opened.
+- Review shell permission patterns as described above. The job/permission control names and transport behavior are preserved.
 
-File/web content is untrusted data, not instructions to the client. The bridge itself never delegates to a model, but an explicitly authorized arbitrary shell command can of course run another program or make network requests. LSP/formatter opt-ins can also launch local tools; defaults are off and were used for the integration verification.
+## Verify and package
 
-## Verification
-
-```sh
-npm run build
-npm run setup:native
-npm test
-npm run typecheck:native
+```bash
+npm ci --ignore-scripts
+npm test                    # builds and runs real filesystem/process/HTTP/stdio tests
+npm run verify:vendor       # provenance hashes and source dependency boundary
+npm run test:package        # npm pack → isolated production install → real MCP smoke
 ```
 
-The native integration suite executes real upstream tools on temporary files (not an emulated OpenCode REST server), including MCP stdio and HTTP, permissions, cancellation/timeouts, native TODO database persistence, Unicode, image forwarding, truncation continuation, root/symlink rejection, and disabled delegation/config/plugin/model paths. It includes model-sampling and local provider canaries. Separate unit tests exercise bridge IPC failure/acknowledgement handling. Linux network-isolated verification can additionally run the suite with loopback only and a preinstalled/cached `rg` on PATH.
+The package smoke test disables OpenCode, Bun and Git commands and executes tools using only the installed archive. CI does not install OpenCode or Bun. Tests cover actual edits/diffs, Unicode/BOM/CRLF, ambiguity, patch operations, approval conflicts, root/symlink restrictions, cancellation/child cleanup, timeouts, bounded output, HTTP authentication, secret stripping and absence of model/plugin execution.
 
-This is a breaking replacement of v0.1: no `opencode serve` process, model API key, or agent prompt route is needed. Merging/deploying this change is separate from creating a PR.
+## License
+
+This project is MIT. Extracted OpenCode code retains its [MIT license](vendor/opencode/LICENSE), pinned source paths and SHA-256 provenance in [UPSTREAM.json](vendor/opencode/UPSTREAM.json).

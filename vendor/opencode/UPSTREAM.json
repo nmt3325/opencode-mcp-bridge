@@ -1,0 +1,162 @@
+{
+  "repository": "https://github.com/anomalyco/opencode",
+  "version": "1.18.29",
+  "commit": "16747470f976aca3d362ad730bcd3fe82ecc2c9a",
+  "license": "MIT",
+  "files": [
+    {
+      "file": "src/vendor/opencode/read.ts",
+      "source": "packages/opencode/src/tool/read.ts",
+      "sourceSha256": "afec8294965cbd9b9e29d3453b682164f0ecdba26574ebc048e9ba21af209c68",
+      "changes": "Import paths adapted; application services removed.",
+      "vendoredSha256": "435bea5c6b96acb0c36e7d7605c7ab82c7089954503bc901567c8c16d6fb5d34"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/read.ts",
+      "source": "packages/opencode/src/tool/read.txt",
+      "sourceSha256": "98ee843341c2dab2227add0019e48d4b2f0f00f9b042b853d1ee52bb34e6363d",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; standalone description corrections documented in README",
+      "vendoredSha256": "1b5ae699f56bf60a3341f413dc3e162f1e914b884bca0b1379a1ff938caa1274"
+    },
+    {
+      "file": "src/vendor/opencode/write.ts",
+      "source": "packages/opencode/src/tool/write.ts",
+      "sourceSha256": "861de91cc67849e138c32a697c8eb1abab8e4912bfd97811ea1866b8e9af4096",
+      "changes": "Import paths adapted; application services removed.",
+      "vendoredSha256": "e7870bec3b78c92df7225396b166f1d2557989e5ec27a9384fe8b83208aabe2b"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/write.ts",
+      "source": "packages/opencode/src/tool/write.txt",
+      "sourceSha256": "8b7197b6e3a8ec1d129eeb6b82608e4cab759bfcc60ba890ecf36322a6e45180",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; standalone description corrections documented in README",
+      "vendoredSha256": "bb85a78cd7b4fd0a89da163e0ed3bd7b065aad303d2d0d9e2b153e5450f86ab9"
+    },
+    {
+      "file": "src/vendor/opencode/edit.ts",
+      "source": "packages/opencode/src/tool/edit.ts",
+      "sourceSha256": "f84d9d242137e1f18ce912188efb7a97b71bf4f255e0a69f16a1fe9d1ff236d4",
+      "changes": "Import paths adapted; application services removed.; replaceAll uses literal callback replacement to avoid dollar expansion; removed history claim in description",
+      "vendoredSha256": "407f2763f65e886ad7c2096db940bf6d18d6387ba87c1b567fc2437fa12d29a8"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/edit.ts",
+      "source": "packages/opencode/src/tool/edit.txt",
+      "sourceSha256": "4426ccf60241fe41d01bbafc1e7450ea6538003f9fca863ab0210492a74647f8",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; replaceAll uses literal callback replacement to avoid dollar expansion; removed history claim in description; standalone description corrections documented in README",
+      "vendoredSha256": "455fba5ff6f8694b7d283dd085c85ea67141a1ac965fb84021e1b69cfcad01b8"
+    },
+    {
+      "file": "src/vendor/opencode/glob.ts",
+      "source": "packages/opencode/src/tool/glob.ts",
+      "sourceSha256": "a5069377ae916495a72be319d218878136fc13f18551f3e16981d8c692c68a4a",
+      "changes": "Import paths adapted; application services removed.",
+      "vendoredSha256": "569aeb942133e7eab2d43ab0c6db3f452b75acb029535409664029a3db338d7a"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/glob.ts",
+      "source": "packages/opencode/src/tool/glob.txt",
+      "sourceSha256": "50b2d2c41d4b8d0286ab4542c6ec882421ac4ae5c0567ad213c3668ed973ed9a",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; standalone description corrections documented in README",
+      "vendoredSha256": "f91cba09c2c2c10212eb6c48b1f98c9c5404b9fb4bd69569a70f985cd79d7d22"
+    },
+    {
+      "file": "src/vendor/opencode/grep.ts",
+      "source": "packages/opencode/src/tool/grep.ts",
+      "sourceSha256": "f7bbab8ae3fabfe3dd78b5728a283a56bff318d5b1f278d15d1c637227ff660f",
+      "changes": "Import paths adapted; application services removed.",
+      "vendoredSha256": "ec1ad0bc8377c33884ee831fda7eb1f3c147d9e8c491edf8ab202e881709cac0"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/grep.ts",
+      "source": "packages/opencode/src/tool/grep.txt",
+      "sourceSha256": "97fa2a9929353d20d3418041aae53ffea3aaf63e9a6e2fdc8cff6db61c3f4c5e",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; standalone description corrections documented in README",
+      "vendoredSha256": "54649ffa2575735255969d3efa413cffae1c956c9602226dfbae9a666b70c6a8"
+    },
+    {
+      "file": "src/vendor/opencode/webfetch.ts",
+      "source": "packages/opencode/src/tool/webfetch.ts",
+      "sourceSha256": "8d9efbad1ffdf8dc29dbac80eb5372ba66a8c80fccaa1606d4e41a9c929a5b6b",
+      "changes": "Import paths adapted; application services removed.; stream-bound response size and full-body deadline; positive timeout validation; truthful HTTP/no-inference description",
+      "vendoredSha256": "c74ac0c770b9787fc71504a10dc292fd5f991c15e00af1c569be1927f41678e3"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/webfetch.ts",
+      "source": "packages/opencode/src/tool/webfetch.txt",
+      "sourceSha256": "0da3ec7c3f6bc47706553c1c522dacb2042d66a4c2bf09368e43ce4a72f3b7dc",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; stream-bound response size and full-body deadline; positive timeout validation; truthful HTTP/no-inference description; standalone description corrections documented in README",
+      "vendoredSha256": "76b930396983edff4d612f2e69e7d07f086d9f9ae6233fd583441fb686726e30"
+    },
+    {
+      "file": "src/vendor/opencode/todo.ts",
+      "source": "packages/opencode/src/tool/todo.ts",
+      "sourceSha256": "f18fdedc754e0842660a968fa225ed961fb516a544eb04209d8b44c7673df270",
+      "changes": "Import paths adapted; application services removed.",
+      "vendoredSha256": "91c27ac4d89ed99309c4d346ee43f9e4974fc863c1dceafdf4e7beb54dfcda84"
+    },
+    {
+      "file": "src/vendor/opencode/descriptions/todowrite.ts",
+      "source": "packages/opencode/src/tool/todowrite.txt",
+      "sourceSha256": "f214ea20cd870a9837cb30dd993aefbe5abe6d9e3319b47672c529961ba0c3ad",
+      "changes": "Text encoded as an ESM string; not an instruction/prompt endpoint.; standalone description corrections documented in README",
+      "vendoredSha256": "b1e72b9441b6003d026dd63f562b5019b95f18e840a4173884aa382bf51853ad"
+    },
+    {
+      "file": "src/vendor/opencode/bom.ts",
+      "source": "packages/opencode/src/util/bom.ts",
+      "sourceSha256": "6384aefb788bf4ac5ed90eb763c695e3209e7ded1d1811ed7eeeb91f805c7586",
+      "changes": "ESM import path only; helper algorithms retained.",
+      "vendoredSha256": "a85e6b2a4b2ce0e50a1c4a75468eb6640b041999efad3313b9aa96a9f7b71d38"
+    },
+    {
+      "file": "src/vendor/opencode/media.ts",
+      "source": "packages/opencode/src/util/media.ts",
+      "sourceSha256": "3682d92955c350c7ad4e1cce838f908ab1eae487cf5e05396d829f7bf579fa38",
+      "changes": "ESM import path only; helper algorithms retained.",
+      "vendoredSha256": "940789d4296f5d4d8afc29e98cab215fc48462433b710845682a5fdfae31e3af"
+    },
+    {
+      "file": "src/vendor/opencode/json-schema.ts",
+      "source": "packages/opencode/src/tool/json-schema.ts",
+      "sourceSha256": "123ae7e75b54161e54645d14f614700674acb6eb293d8a1249a9de57d84f4dba",
+      "changes": "Removed type-only AI SDK import; schema normalization is retained.",
+      "vendoredSha256": "176b78533620aaf25f7254f45ed9f59ba73c6a37fdc1193b86b9d6ea69464f12"
+    },
+    {
+      "file": "src/vendor/opencode/patch.ts",
+      "source": "packages/core/src/patch.ts",
+      "sourceSha256": "46224ac9385b3d681b739800eb1f75a6ca012a54b66bbbf392b1dd5647e0ef6d",
+      "changes": "Only self-reexport extension changed; pure patch parsing and matching are unchanged.",
+      "vendoredSha256": "402e684026ecb2b48be10f24b3d7a9d67e4560eec3c088f61f8fa0642c855c5e"
+    },
+    {
+      "file": "src/vendor/opencode/wildcard.ts",
+      "source": "packages/core/src/util/wildcard.ts",
+      "sourceSha256": "58803dad815e7086ad3e71746bb39fd63d48ab3041644cbd5f9a546c5617157c",
+      "changes": "Pure permission-pattern matcher; no application runtime.",
+      "vendoredSha256": "2175b696976f4900e3131ac1df49bea1951479f76b82219620d8a2577954fc6c"
+    },
+    {
+      "file": "src/vendor/opencode/shell-output.ts",
+      "source": "packages/opencode/src/tool/shell.ts",
+      "sourceSha256": "342d742ae324782d222465c202dcdfcb7cc35a4cecf04e87f9881f1794d921ac",
+      "changes": "Extracted preview and UTF-8-safe tail algorithms; process/permission adapters are in src/runtime/shell.ts.",
+      "vendoredSha256": "3e36358f3dc8378c86e5ebf0c702fe8f964db0f3d1c603cd563cd2d6fc60d1de"
+    },
+    {
+      "file": "src/vendor/opencode/shell-parameters.ts",
+      "source": "packages/opencode/src/tool/shell/prompt.ts",
+      "sourceSha256": "f3c6bdb216a9df2dd871d3a786b2abe3a20ea3e44b9121ce0610c648256fb2b6",
+      "changes": "Original command/timeout/workdir schema; shell-specific chat instructions are not included.",
+      "vendoredSha256": "29aa87301f5ef52b028d18770bfc721f14f983c0caa6e07efb7bb34c32c579b5"
+    },
+    {
+      "file": "src/runtime/todo-store.ts",
+      "source": "packages/schema/src/session-todo.ts",
+      "sourceSha256": "7b6e41ea6760ce94f5e817a574bf071608ad7e38639dcb520974d3e4de9aa1e0",
+      "vendoredSha256": "50815c6e3e7b4358e586d876beef48facc6ee7845718dbdffb7492ab82ed15f7",
+      "changes": "Retained only Info schema; application session/event schema removed; standalone atomic JSON persistence adapter added"
+    }
+  ]
+}
