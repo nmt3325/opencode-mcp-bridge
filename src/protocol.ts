@@ -6,13 +6,8 @@ export interface NativeResult {
   metadata: Record<string, unknown>
   attachments?: Array<{ type: "file"; mime: string; url: string; filename?: string }>
 }
-export interface PermissionRequest {
-  id: string
-  permission: string
-  patterns: string[]
-  metadata: Record<string, unknown>
-}
-export type JobStatus = "running" | "awaiting_permission" | "cancelling" | "completed" | "failed" | "cancelled"
+// There is no awaiting_permission state: execution is never gated on a reply.
+export type JobStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled"
 export interface JobView {
   job_id: string
   tool: string
@@ -21,7 +16,6 @@ export interface JobView {
   updated_at: string
   result?: NativeResult
   progress?: { title?: string; metadata?: Record<string, unknown> }
-  permission?: PermissionRequest
   error?: string
 }
 export function isTerminal(status: JobStatus): boolean {

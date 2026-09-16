@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { after, before, test } from "node:test"
-import { mkdtemp, mkdir, readFile, writeFile, symlink, rm, access, readdir, chmod, rename } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, writeFile, symlink, rm, access, readdir } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { createServer } from "node:http"
@@ -21,18 +21,15 @@ const exists = (path) => access(path).then(() => true, () => false)
 const terminal = (job) => ["completed", "failed", "cancelled"].includes(job.status)
 const unpack = (result) => result.structuredContent ?? JSON.parse(result.content.find((item) => item.type === "text").text)
 async function call(name, args = {}, connection = client) { return unpack(await connection.callTool({ name, arguments: args })) }
-async function finish(job, approve = false, connection = client) {
+async function finish(job, connection = client) {
   for (let attempt = 0; attempt < 30 && !terminal(job); attempt++) {
-    if (job.status === "awaiting_permission") {
-      if (!approve) return job
-      job = await call("opencode_permission_reply", { job_id: job.job_id, permission_id: job.permission.id, reply: "once" }, connection)
-    } else job = await call("opencode_job_result", { job_id: job.job_id, wait_seconds: 1 }, connection)
+    job = await call("opencode_job_result", { job_id: job.job_id, wait_seconds: 1 }, connection)
   }
   assert.ok(terminal(job), `job did not finish: ${JSON.stringify(job)}`)
   return job
 }
 async function complete(name, args, connection = client) {
-  const job = await finish(await call(name, args, connection), true, connection)
+  const job = await finish(await call(name, args, connection), connection)
   assert.equal(job.status, "completed", JSON.stringify(job))
   return job
 }
@@ -109,6 +106,7 @@ test("native catalog and original schemas are exposed, delegation is absent", as
   }
   const info = await call("opencode_native_info")
   assert.equal(info.llm_delegation, false)
+  assert.equal(info.pre_execution_approval, false)
   assert.equal(info.implementation, "vendored-tools")
   assert.equal(info.opencode_installation_required, false)
   assert.equal(info.runtime, "node")
@@ -122,13 +120,10 @@ test("native read preserves line metadata and Unicode", async () => {
   assert.equal(job.result.metadata.display.totalLines, 2)
 })
 
-test("native write waits for approval and writes actual bytes", async () => {
+test("native write executes immediately and writes actual bytes", async () => {
   const file = join(root, "written.txt")
-  const pending = await call("write", { filePath: file, content: "first\n日本語\n" })
-  assert.equal(pending.status, "awaiting_permission")
-  assert.equal(pending.permission.permission, "edit")
   assert.equal(await exists(file), false)
-  const done = await finish(pending, true)
+  const done = await complete("write", { filePath: file, content: "first\n日本語\n" })
   assert.equal(done.status, "completed")
   assert.equal(await readFile(file, "utf8"), "first\n日本語\n")
 })
@@ -194,26 +189,25 @@ test("workspace traversal, sibling prefixes, and symlink escapes are denied", as
   assert.equal(await readFile(join(temporary, "outside.txt"), "utf8"), "do not disclose")
 })
 
-test("rejecting one permission does not approve or reject another job", async () => {
-  const first = await call("write", { filePath: join(root, "rejected.txt"), content: "no" })
-  const second = await call("write", { filePath: join(root, "approved.txt"), content: "yes" })
-  assert.equal(first.status, "awaiting_permission")
-  assert.equal(second.status, "awaiting_permission")
-  const wrong = await client.callTool({ name: "opencode_permission_reply", arguments: { job_id: first.job_id, permission_id: second.permission.id, reply: "once" } })
-  assert.equal(wrong.isError, true)
-  const rejected = await call("opencode_permission_reply", { job_id: first.job_id, permission_id: first.permission.id, reply: "reject" })
-  assert.equal((await finish(rejected)).status, "failed")
-  assert.equal((await call("opencode_job_result", { job_id: second.job_id, wait_seconds: 0 })).status, "awaiting_permission")
-  assert.equal((await finish(second, true)).status, "completed")
-  assert.equal(await exists(join(root, "rejected.txt")), false)
+test("permission controls are gone and concurrent writes both execute", async () => {
+  const catalog = (await client.listTools()).tools.map((tool) => tool.name)
+  for (const name of ["opencode_permissions_pending", "opencode_permission_reply"]) {
+    assert.ok(!catalog.includes(name))
+    assert.equal((await client.callTool({ name, arguments: {} })).isError, true)
+  }
+  const first = await call("write", { filePath: join(root, "first-write.txt"), content: "no prompt" })
+  const second = await call("write", { filePath: join(root, "second-write.txt"), content: "no prompt either" })
+  assert.ok(!("permission" in first))
+  assert.equal((await finish(first)).status, "completed")
+  assert.equal((await finish(second)).status, "completed")
+  assert.equal(await readFile(join(root, "first-write.txt"), "utf8"), "no prompt")
+  assert.equal(await readFile(join(root, "second-write.txt"), "utf8"), "no prompt either")
 })
 
-test("protected .env reads require a permission decision", async () => {
+test("previously gated .env reads now execute without a decision", async () => {
   await writeFile(join(root, ".env"), "TEST_ONLY=example")
-  const job = await call("read", { filePath: join(root, ".env") })
-  assert.equal(job.status, "awaiting_permission")
-  await call("opencode_job_cancel", { job_id: job.job_id })
-  assert.equal((await finish(await call("opencode_job_result", { job_id: job.job_id, wait_seconds: 1 }))).status, "cancelled")
+  const job = await complete("read", { filePath: join(root, ".env") })
+  assert.match(job.result.output, /TEST_ONLY=example/)
 })
 
 test("native shell returns real stdout and exit status", async () => {
@@ -223,20 +217,19 @@ test("native shell returns real stdout and exit status", async () => {
 })
 
 test("bounded waits retain a long native command without rerunning it", async () => {
-  const pending = await call("bash", { command: "sleep 2; printf done >> once.txt", timeout: 10000 })
-  const approved = await call("opencode_permission_reply", { job_id: pending.job_id, permission_id: pending.permission.id, reply: "once" })
-  assert.equal(approved.job_id, pending.job_id)
-  assert.equal(approved.status, "running")
-  const done = await finish(approved)
+  const started = await call("bash", { command: "sleep 2; printf done >> once.txt", timeout: 10000 })
+  assert.equal(started.status, "running")
+  const polled = await call("opencode_job_result", { job_id: started.job_id, wait_seconds: 0 })
+  assert.equal(polled.job_id, started.job_id)
+  const done = await finish(started)
   assert.equal(done.status, "completed")
   assert.equal(await readFile(join(root, "once.txt"), "utf8"), "done")
 })
 
 test("cancellation terminates the native shell and its child process", async () => {
-  const pending = await call("bash", { command: "sleep 3; printf unwanted > cancelled-marker.txt", timeout: 10000 })
-  const running = await call("opencode_permission_reply", { job_id: pending.job_id, permission_id: pending.permission.id, reply: "once" })
-  await call("opencode_job_cancel", { job_id: running.job_id })
-  const done = await finish(await call("opencode_job_result", { job_id: running.job_id, wait_seconds: 1 }))
+  const started = await call("bash", { command: "sleep 3; printf unwanted > cancelled-marker.txt", timeout: 10000 })
+  await call("opencode_job_cancel", { job_id: started.job_id })
+  const done = await finish(await call("opencode_job_result", { job_id: started.job_id, wait_seconds: 1 }))
   assert.equal(done.status, "cancelled")
   await delay(3200)
   assert.equal(await exists(join(root, "cancelled-marker.txt")), false)
@@ -286,26 +279,6 @@ test("patch refuses an existing add/move target and duplicate paths", async () =
   }
   assert.equal(await readFile(join(root, "seed.txt"), "utf8"), "alpha 日本語\nbeta\n")
   assert.equal(await exists(join(root, "duplicate.txt")), false)
-})
-
-test("write refuses a file changed while its permission was pending", async () => {
-  const path = join(root, "concurrent.txt")
-  await writeFile(path, "original")
-  const pending = await call("write", { filePath: path, content: "tool change" })
-  assert.equal(pending.status, "awaiting_permission")
-  await writeFile(path, "user change")
-  const rejected = await finish(pending, true)
-  assert.equal(rejected.status, "failed")
-  assert.match(rejected.error, /changed.*permission/)
-  assert.equal(await readFile(path, "utf8"), "user change")
-})
-
-test("new-file permission cannot overwrite a file created by someone else", async () => {
-  const path = join(root, "created-concurrently.txt")
-  const pending = await call("write", { filePath: path, content: "tool change" })
-  await writeFile(path, "created by user")
-  assert.equal((await finish(pending, true)).status, "failed")
-  assert.equal(await readFile(path, "utf8"), "created by user")
 })
 
 test("edit retains BOM and CRLF with upstream replacement semantics", async () => {
@@ -372,10 +345,10 @@ test("saved output access is limited to the exact registered file", async () => 
 })
 
 test("webfetch caps chunked bytes and times out slow response bodies", async () => {
-  const large = await finish(await call("webfetch", { url: `${webUrl}/oversized`, format: "text" }), true)
+  const large = await finish(await call("webfetch", { url: `${webUrl}/oversized`, format: "text" }))
   assert.equal(large.status, "failed", JSON.stringify(large))
   assert.match(large.error, /too large/)
-  const slow = await finish(await call("webfetch", { url: `${webUrl}/slow`, format: "text", timeout: 0.1 }), true)
+  const slow = await finish(await call("webfetch", { url: `${webUrl}/slow`, format: "text", timeout: 0.1 }))
   assert.equal(slow.status, "failed", JSON.stringify(slow))
   assert.match(slow.error, /timed out/)
 })
@@ -385,21 +358,6 @@ test("the MCP server advertises tools only, no prompts or sampling service", asy
   assert.deepEqual(Object.keys(capabilities), ["tools"])
   await assert.rejects(client.listPrompts())
   await assert.rejects(client.listResources())
-})
-
-test("permission-time mode changes and parent symlink swaps are refused", async () => {
-  const modePath = join(root, "mode-change.txt")
-  await writeFile(modePath, "original", { mode: 0o600 })
-  let pending = await call("write", { filePath: modePath, content: "changed" })
-  await chmod(modePath, 0o644)
-  assert.equal((await finish(pending, true)).status, "failed")
-  assert.equal(await readFile(modePath, "utf8"), "original")
-  const parent = join(root, "swap-parent"), outside = join(temporary, "swap-outside")
-  await mkdir(parent); await mkdir(outside)
-  pending = await call("write", { filePath: join(parent, "file.txt"), content: "changed" })
-  await rename(parent, parent + "-original"); await symlink(outside, parent)
-  assert.equal((await finish(pending, true)).status, "failed")
-  assert.equal(await exists(join(outside, "file.txt")), false)
 })
 
 test("real HTTP transport requires auth and retains jobs across transport sessions", async () => {
@@ -427,7 +385,6 @@ test("stdio starts a real native worker and does not inherit parent secrets", as
   samplingGuard(stdio)
   const transport = new StdioClientTransport({ command: process.execPath, args: [resolve("dist/index.js"), "--stdio"], cwd: resolve("."), stderr: "pipe", env: {
     PATH: process.env.PATH, OPENCODE_MCP_ROOT: root, OPENCODE_MCP_STATE_DIR: join(temporary, "stdio-state"),
-    OPENCODE_MCP_PERMISSIONS: JSON.stringify({ bash: "allow" }),
     FAKE_PARENT_SECRET_FOR_TEST: "must-not-be-inherited", OPENAI_API_KEY: "fake-key-not-a-secret",
   } })
   transport.stderr?.on("data", () => {})
