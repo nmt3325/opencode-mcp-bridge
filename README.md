@@ -77,19 +77,19 @@ node dist/index.js --http
 
 ## Execution and jobs
 
-There is **no pre-execution approval step**. Any caller that passes transport authentication can read, write, patch, run shell commands and fetch web resources inside the configured workspace, and the operation starts immediately. Treat the MCP token as equivalent to shell access under the OS account that runs this server.
+There is **no pre-execution approval step**. Any caller that passes transport authentication can read, write, patch, run shell commands and fetch web resources anywhere the OS account can reach, and the operation starts immediately. Treat the MCP token as equivalent to shell access under the OS account that runs this server.
 
 Two limits are still enforced, without asking anyone:
 
-- Paths are canonicalized and must stay inside `OPENCODE_MCP_ROOT`. Symlink escapes, the private state directory and the package directory are rejected.
-- The `external_directory`, `task` and `question` capabilities are always denied, so no extracted tool can negotiate a way out of the workspace or reach a delegation path.
+- Paths are canonicalized, and the bridge's private state directory and its own package directory are refused. `OPENCODE_MCP_ROOT` is the base for relative paths and the default working directory, **not** a jail: absolute paths and `../` targets outside it resolve normally.
+- Capabilities this toolbox does not implement are refused as unsupported. There is no deny list, and no delegation (`task`) or interactive-question (`question`) tool exists to call in the first place.
 
 A tool call can return `running`. That is **not completion** and must never cause the caller to execute the operation again.
 
 - `opencode_job_result`: poll the same `job_id` (`wait_seconds`: 0–50).
 - `opencode_job_cancel`: cancel and wait for process cleanup.
 - `opencode_job_list`: inspect retained jobs.
-- `opencode_native_info`: compatibility name; reports `implementation: "vendored-tools"`, `pre_execution_approval: false`, the source pin and the tool catalog.
+- `opencode_native_info`: compatibility name; reports `implementation: "vendored-tools"`, `pre_execution_approval: false`, `workspace_confinement: false`, the source pin and the tool catalog.
 
 Jobs survive HTTP transport reconnects, not a server restart. Commands are never replayed automatically. Shell output uses a bounded preview and saved output file, with a **64 MiB capture ceiling** that terminates excessive output. Search subprocess output has an 8 MiB ceiling and a 60-second timeout; refine broad searches if they exceed it. Saved output can be read only through the exact returned path, not by browsing private state directories. Disk outputs remain in the state directory for operator-managed retention; the in-memory job limits do not constitute a disk quota.
 
@@ -97,7 +97,7 @@ Jobs survive HTTP transport reconnects, not a server restart. Commands are never
 
 | Variable | Default / purpose |
 | --- | --- |
-| `OPENCODE_MCP_ROOT` | Required editable directory; `DEFAULT_DIRECTORY` remains an alias |
+| `OPENCODE_MCP_ROOT` | Required default working directory and base for relative paths, not an access boundary; `DEFAULT_DIRECTORY` remains an alias |
 | `OPENCODE_MCP_STATE_DIR` | Private platform state directory, outside the workspace |
 | `OPENCODE_MCP_RG` | `rg`; executable for search tools |
 | `OPENCODE_MCP_WAIT_SECONDS` | 45; initial bounded wait (0–50) |
@@ -107,9 +107,15 @@ Jobs survive HTTP transport reconnects, not a server restart. Commands are never
 | `OPENCODE_MCP_HOST`, `OPENCODE_MCP_PORT` | `127.0.0.1`, `8787` |
 | `OPENCODE_MCP_TOKEN` | Required for HTTP; at least 24 characters, sent as `Authorization: Bearer <token>` or `x-mcp-token` |
 
-The package and private state must be outside the editable root; using the filesystem root is forbidden. File operations canonicalize paths and reject symlink escapes. Writes verify file contents/mode again immediately before the same-directory atomic replacement. A changed file causes a conflict instead of silently overwriting someone else's edit. A multi-file patch is **not a transaction**: all hunks are prevalidated, but an I/O failure/cancellation during application can leave partial changes; inspect files and progress before retrying.
+The package and private state must be outside the workspace root and are refused to tools; using the filesystem root as the workspace is forbidden. File operations canonicalize paths, and a write whose canonical target changed underneath it is refused. Writes verify file contents/mode again immediately before the same-directory atomic replacement. A changed file causes a conflict instead of silently overwriting someone else's edit. A multi-file patch is **not a transaction**: all hunks are prevalidated, but an I/O failure/cancellation during application can leave partial changes; inspect files and progress before retrying.
 
-**This is not an OS sandbox, and nothing prompts before execution.** A shell command started by an authenticated caller can access anything permitted to the OS account that runs this server, including outside the workspace. Untrusted commands require a container/VM, unprivileged account, restricted mounts and network policy. The worker gets a private HOME/XDG/TMP environment and does not inherit model keys, GitHub tokens, SSH agents, MCP tokens or Node/Bun injection flags from the parent. This reduces accidental exposure but does not isolate the executed process from the host filesystem or network.
+**This is not an OS sandbox, nothing prompts before execution, and the workspace root is not a boundary.** A shell command or file tool call started by an authenticated caller can access anything permitted to the OS account that runs this server, including paths outside the workspace. Untrusted commands require a container/VM, unprivileged account, restricted mounts and network policy. The worker gets a private HOME/XDG/TMP environment and does not inherit model keys, GitHub tokens, SSH agents, MCP tokens or Node/Bun injection flags from the parent. This reduces accidental exposure but does not isolate the executed process from the host filesystem or network.
+
+## Migration from 0.4
+
+- File, patch and search tools are no longer confined to `OPENCODE_MCP_ROOT`. It is now the default working directory and the base for relative paths; absolute paths and `../` targets outside it are allowed. The private state directory and the package directory remain refused.
+- The fixed deny list is gone. `external_directory` is an ordinary allowed capability, and `task`/`question` are rejected as unimplemented instead of deny-listed. Neither was ever advertised in `tools/list`.
+- `opencode_native_info` reports `workspace_confinement: false`. If you relied on the root as a containment boundary, enforce it with OS controls instead: a dedicated account, a container/VM, or restricted mounts.
 
 ## Migration from 0.3
 

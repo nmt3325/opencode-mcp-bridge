@@ -10,8 +10,8 @@ import { FSUtil } from "./filesystem.js"
 import { Ripgrep } from "./ripgrep.js"
 import { Output } from "./output.js"
 import { Todo } from "./todo-store.js"
-import { Invocation, Workspace, canonical, checkPath, fingerprint, within } from "./workspace.js"
-import { denied } from "./permissions.js"
+import { PACKAGE_ROOT } from "../config.js"
+import { Invocation, Workspace, canonical, checkPath, fingerprint, reserve, within } from "./workspace.js"
 import { ReadTool } from "../vendor/opencode/read.js"
 import { WriteTool } from "../vendor/opencode/write.js"
 import { EditTool } from "../vendor/opencode/edit.js"
@@ -32,6 +32,10 @@ if (dirname(directory) === directory) throw new Error("Filesystem-root workspace
 const runId = randomUUID()
 const runDir = join(options.stateDir, "runs", runId)
 await mkdir(runDir, { recursive: true, mode: 0o700 })
+// Tools may work anywhere the OS account can reach. Only the bridge's own
+// private state and package trees stay reserved, so job bookkeeping, saved
+// output and the toolbox's own code cannot be rewritten through a tool call.
+reserve([await canonical(options.stateDir), await canonical(PACKAGE_ROOT)])
 const workspace = Layer.succeed(Workspace, { directory, worktree: directory, stateDir: runDir, ripgrep: options.ripgrep })
 const runtime = ManagedRuntime.make(Layer.mergeAll(
   workspace, FSUtil.layer, Ripgrep.layer.pipe(Layer.provide(workspace)),
@@ -44,11 +48,10 @@ const controllers = new Map<string, AbortController>()
 const tasks = new Set<Promise<void>>()
 const savedOutputs = new Set<string>()
 const allowed = new Set(["read", "edit", "glob", "grep", "bash", "webfetch", "todowrite", "external_directory"])
-// No interactive approval: a requested capability either runs immediately or is
-// refused outright by the fixed deny list.
+// No interactive approval and no deny list: a declared capability either belongs
+// to a shipped tool and runs immediately, or is not implemented here at all.
 function ask(input: Parameters<Tool.Context["ask"]>[0]) {
   if (!allowed.has(input.permission) || !input.patterns.length) return Effect.die(new Error("Unsupported permission: " + input.permission))
-  if (denied(input.permission)) return Effect.die(new Error("Permission denied: " + input.permission))
   return Effect.void
 }
 async function execute(message: { id: string; tool: string; args: Record<string, unknown> }) {

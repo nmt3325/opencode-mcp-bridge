@@ -10,7 +10,7 @@ export const UPSTREAM = {
   commit: "16747470f976aca3d362ad730bcd3fe82ecc2c9a",
   distribution: "vendored-tools",
 } as const
-export const VERSION = "0.4.0"
+export const VERSION = "0.5.0"
 export const NATIVE_TOOL_IDS = ["read", "write", "edit", "glob", "grep", "bash", "webfetch", "todowrite", "apply_patch"] as const
 
 export interface BridgeConfig {
@@ -43,7 +43,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     if (env[key] && !["false", "0"].includes(env[key]!)) throw new Error(`${key} was removed: application services are not included in the standalone toolbox`)
   }
   const directory = env.OPENCODE_MCP_ROOT ?? env.OPENCODE_MCP_DEFAULT_DIRECTORY
-  if (!directory) throw new Error("Set OPENCODE_MCP_ROOT to the workspace directory; implicit filesystem-wide access is not allowed.")
+  if (!directory) throw new Error("Set OPENCODE_MCP_ROOT to the default working directory; relative tool paths resolve against it.")
   const root = resolve(directory)
   if (dirname(root) === root) throw new Error("The filesystem root cannot be the toolbox workspace")
   const key = createHash("sha256").update(root).digest("hex").slice(0, 20)
