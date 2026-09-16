@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Requires npm run setup:native. No fake OpenCode server is used.
+# Requires Node.js and ripgrep, not an OpenCode install. Tools run on real files.
 npm test

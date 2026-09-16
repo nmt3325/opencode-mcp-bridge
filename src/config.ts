@@ -9,18 +9,18 @@ export const UPSTREAM = {
   repository: "https://github.com/anomalyco/opencode.git",
   version: "1.18.29",
   commit: "16747470f976aca3d362ad730bcd3fe82ecc2c9a",
-  bun: "1.3.14",
+  distribution: "vendored-tools",
 } as const
-export const NATIVE_TOOL_IDS = ["read", "write", "edit", "glob", "grep", "bash", "webfetch", "todowrite"] as const
+export const VERSION = "0.3.0"
+export const NATIVE_TOOL_IDS = ["read", "write", "edit", "glob", "grep", "bash", "webfetch", "todowrite", "apply_patch"] as const
 
 const action = z.enum(["allow", "ask", "deny"])
 const permissions = z.record(z.union([action, z.record(action)]))
 export type PermissionConfig = z.infer<typeof permissions>
 export interface BridgeConfig {
   root: string
-  runtimeDir: string
   stateDir: string
-  bun: string
+  ripgrep: string
   httpHost: string
   httpPort: number
   mcpToken?: string
@@ -29,8 +29,6 @@ export interface BridgeConfig {
   maxJobs: number
   maxConcurrent: number
   permissions: PermissionConfig
-  lsp: boolean
-  formatter: boolean
 }
 
 function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -38,16 +36,13 @@ function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, min: num
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${key} must be an integer between ${min} and ${max}`)
   return value
 }
-function boolean(env: NodeJS.ProcessEnv, key: string): boolean {
-  const value = env[key]
-  if (value === undefined || value === "false" || value === "0") return false
-  if (value === "true" || value === "1") return true
-  throw new Error(`${key} must be true or false`)
-}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
-  for (const key of ["OPENCODE_BASE_URL", "OPENCODE_SERVER_PASSWORD", "OPENCODE_API_TOKEN", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND"]) {
+  for (const key of ["OPENCODE_BASE_URL", "OPENCODE_SERVER_PASSWORD", "OPENCODE_API_TOKEN", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND", "OPENCODE_MCP_RUNTIME_DIR", "OPENCODE_MCP_BUN"]) {
     if (env[key]) throw new Error(`${key} was removed: this bridge executes native tools only. See README migration instructions.`)
+  }
+  for (const key of ["OPENCODE_MCP_LSP", "OPENCODE_MCP_FORMATTER"]) {
+    if (env[key] && !["false", "0"].includes(env[key]!)) throw new Error(`${key} was removed: application services are not included in the standalone toolbox`)
   }
   const directory = env.OPENCODE_MCP_ROOT ?? env.OPENCODE_MCP_DEFAULT_DIRECTORY
   if (!directory) throw new Error("Set OPENCODE_MCP_ROOT to the workspace directory; implicit filesystem-wide access is not allowed.")
@@ -60,9 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   if (maxConcurrent > maxJobs) throw new Error("OPENCODE_MCP_MAX_CONCURRENT must not exceed OPENCODE_MCP_MAX_JOBS")
   return {
     root,
-    runtimeDir: resolve(env.OPENCODE_MCP_RUNTIME_DIR ?? join(PACKAGE_ROOT, ".opencode-runtime")),
     stateDir: resolve(env.OPENCODE_MCP_STATE_DIR ?? join(homedir(), ".local", "state", "opencode-mcp-bridge", key)),
-    bun: env.OPENCODE_MCP_BUN ?? "bun",
+    ripgrep: env.OPENCODE_MCP_RG ?? "rg",
     httpHost: env.OPENCODE_MCP_HOST ?? "127.0.0.1",
     httpPort: integer(env, "OPENCODE_MCP_PORT", 8787, 1, 65535),
     mcpToken: env.OPENCODE_MCP_TOKEN,
@@ -70,8 +64,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     jobTimeoutMs: integer(env, "OPENCODE_MCP_JOB_TIMEOUT_SECONDS", 600, 5, 3600) * 1000,
     maxJobs, maxConcurrent,
     permissions: policy,
-    lsp: boolean(env, "OPENCODE_MCP_LSP"),
-    formatter: boolean(env, "OPENCODE_MCP_FORMATTER"),
   }
 }
 
@@ -94,12 +86,6 @@ export function workerEnvironment(config: BridgeConfig, env: NodeJS.ProcessEnv =
     APPDATA: join(home, "config"),
     LOCALAPPDATA: join(home, "data"),
     TMPDIR: join(home, "tmp"), TEMP: join(home, "tmp"), TMP: join(home, "tmp"),
-    OPENCODE_DISABLE_MODELS_FETCH: "true",
-    OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
-    OPENCODE_PURE: "true",
-    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
-    OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
-    OPENCODE_DISABLE_CLAUDE_CODE: "true",
-    OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
+
   }
 }

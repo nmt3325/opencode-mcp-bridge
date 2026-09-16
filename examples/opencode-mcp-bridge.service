@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenCode native execution MCP toolbox
+Description=Standalone OpenCode tools MCP server
 After=network.target
 
 [Service]
@@ -7,11 +7,10 @@ Type=simple
 User=opencode
 Group=opencode
 WorkingDirectory=/opt/opencode-mcp-bridge
-# Install the pinned runtime under this service user's ownership.
+# Install Node.js and ripgrep, then build this server with npm.
 Environment=OPENCODE_MCP_ROOT=/srv/opencode-workspace
-Environment=OPENCODE_MCP_RUNTIME_DIR=/opt/opencode-runtime
 Environment=OPENCODE_MCP_STATE_DIR=/var/lib/opencode-mcp-bridge
-Environment=OPENCODE_MCP_BUN=/usr/local/bin/bun
+Environment=OPENCODE_MCP_RG=/usr/bin/rg
 Environment=OPENCODE_MCP_HOST=127.0.0.1
 Environment=OPENCODE_MCP_PORT=8787
 # Store only OPENCODE_MCP_TOKEN in this root-owned, mode-0600 file.
