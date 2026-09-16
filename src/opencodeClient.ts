@@ -21,7 +21,6 @@ export class OpencodeClient {
   private catalog: NativeTool[] = []
   private jobs = new Map<string, Job>()
   private changed = new EventEmitter()
-  private acknowledgements = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>()
   private fatal?: Error
   private started = false
   private stopping = false
@@ -45,7 +44,7 @@ export class OpencodeClient {
     const ready = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject })
     const timer = setTimeout(() => this.fail(new Error("Native runtime startup timed out")), 30000)
     const entry = join(PACKAGE_ROOT, "dist/runtime/worker.js")
-    this.child = spawn(process.execPath, [entry, JSON.stringify({ root: this.config.root, stateDir: this.config.stateDir, permissions: this.config.permissions, ripgrep: this.config.ripgrep })], {
+    this.child = spawn(process.execPath, [entry, JSON.stringify({ root: this.config.root, stateDir: this.config.stateDir, ripgrep: this.config.ripgrep })], {
       cwd: this.config.root, env, stdio: ["pipe", "pipe", "pipe"],
     })
     this.child.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk))
@@ -76,25 +75,14 @@ export class OpencodeClient {
       this.readyResolve?.()
       return
     }
-    const acknowledgement = this.acknowledgements.get(message.id)
-    if (acknowledgement) {
-      clearTimeout(acknowledgement.timer)
-      this.acknowledgements.delete(message.id)
-      if (message.type === "ack") acknowledgement.resolve()
-      else acknowledgement.reject(new Error(message.error ?? "Native acknowledgement failed"))
-      return
-    }
     const job = this.jobs.get(message.id)
     if (!job || isTerminal(job.status)) return
     job.updated_at = new Date().toISOString()
     if (message.type === "progress") job.progress = message.progress
-    else if (message.type === "permission") {
-      if (!job.cancelReason) { job.status = "awaiting_permission"; job.permission = message.request }
-    } else if (message.type === "result" || message.type === "error") {
+    else if (message.type === "result" || message.type === "error") {
       job.status = job.cancelReason ? "cancelled" : message.type === "error" ? "failed" : "completed"
       if (message.type === "result") job.result = message.result
       job.error = job.cancelReason ?? message.error
-      job.permission = undefined
       clearTimeout(job.timer)
     } else throw new Error("Unknown native response type")
     job.bytes = Buffer.byteLength(JSON.stringify(this.snapshot(job.job_id)))
@@ -113,11 +101,9 @@ export class OpencodeClient {
     this.fatal = error
     this.readyReject?.(error)
     for (const job of this.jobs.values()) if (!isTerminal(job.status)) {
-      job.status = "failed"; job.error = error.message; job.permission = undefined
+      job.status = "failed"; job.error = error.message
       clearTimeout(job.timer); this.changed.emit(job.job_id)
     }
-    for (const item of this.acknowledgements.values()) { clearTimeout(item.timer); item.reject(error) }
-    this.acknowledgements.clear()
     this.child?.kill("SIGTERM")
     const child = this.child
     const force = setTimeout(() => { if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL") }, 5000)
@@ -146,14 +132,11 @@ export class OpencodeClient {
     return this.catalog
   }
   info(): Record<string, unknown> {
-    return { mode: "toolbox-only", implementation: "vendored-tools", runtime: "node", opencode_installation_required: false, llm_delegation: false, ready: !!this.catalog.length && !this.fatal,
+    return { mode: "toolbox-only", implementation: "vendored-tools", runtime: "node", opencode_installation_required: false, llm_delegation: false, pre_execution_approval: false, ready: !!this.catalog.length && !this.fatal,
       upstream: UPSTREAM, directory: this.config.root, tools: this.catalog.map((tool) => tool.name) }
   }
   list(): JobView[] {
     return [...this.jobs.keys()].map((id) => { const { result: _result, progress: _progress, ...summary } = this.snapshot(id); return summary })
-  }
-  pending(): Array<Record<string, unknown>> {
-    return this.list().filter((job) => job.permission && !isTerminal(job.status)).map((job) => ({ job_id: job.job_id, ...job.permission }))
   }
   startJob(tool: string, args: Record<string, unknown>): string {
     if (!this.tools().some((item) => item.name === tool)) throw new Error("Unknown tool: " + tool)
@@ -170,10 +153,10 @@ export class OpencodeClient {
   }
   wait(id: string, waitMs: number): Promise<JobView> {
     const job = this.get(id)
-    if (isTerminal(job.status) || job.status === "awaiting_permission" || waitMs <= 0) return Promise.resolve(this.snapshot(id))
+    if (isTerminal(job.status) || waitMs <= 0) return Promise.resolve(this.snapshot(id))
     return new Promise((resolve) => {
       const finish = () => { clearTimeout(timer); this.changed.off(id, changed); resolve(this.snapshot(id)) }
-      const changed = () => { const status = this.get(id).status; if (isTerminal(status) || status === "awaiting_permission") finish() }
+      const changed = () => { if (isTerminal(this.get(id).status)) finish() }
       const timer = setTimeout(finish, Math.min(50000, Math.max(0, waitMs)))
       this.changed.on(id, changed)
     })
@@ -181,28 +164,12 @@ export class OpencodeClient {
   cancel(id: string, reason = "Cancellation requested; completed file writes are not undone"): JobView {
     const job = this.get(id)
     if (!isTerminal(job.status) && !job.cancelReason) {
-      job.cancelReason = reason; job.status = "cancelling"; job.permission = undefined
+      job.cancelReason = reason; job.status = "cancelling"
       try { this.send({ type: "cancel", id }) }
       catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))) }
       this.changed.emit(id)
     }
     return this.snapshot(id)
-  }
-  async reply(id: string, permissionId: string, reply: "once" | "reject"): Promise<void> {
-    const job = this.get(id)
-    if (job.permission?.id !== permissionId || job.status !== "awaiting_permission") throw new Error("Permission does not belong to this pending job")
-    const rpc = randomUUID()
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { this.acknowledgements.delete(rpc); reject(new Error("Permission reply acknowledgement timed out; inspect the existing job before retrying")) }, 5000)
-      this.acknowledgements.set(rpc, { resolve, reject, timer })
-      try { this.send({ type: "reply", id: rpc, job_id: id, permission_id: permissionId, reply }) }
-      catch (error) { clearTimeout(timer); this.acknowledgements.delete(rpc); reject(error) }
-    })
-    // ACK may share a frame with completion or a newer permission request.
-    if (job.status === "awaiting_permission" && job.permission?.id === permissionId) {
-      job.permission = undefined; job.status = "running"
-      this.changed.emit(id)
-    }
   }
   async stop(): Promise<void> {
     if (this.stopping) return

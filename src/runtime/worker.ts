@@ -5,14 +5,13 @@ import { dirname, join, resolve } from "node:path"
 import { createInterface } from "node:readline"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
-import type { PermissionConfig } from "../config.js"
 import { Tool } from "./tool.js"
 import { FSUtil } from "./filesystem.js"
 import { Ripgrep } from "./ripgrep.js"
 import { Output } from "./output.js"
 import { Todo } from "./todo-store.js"
 import { Invocation, Workspace, canonical, checkPath, fingerprint, within } from "./workspace.js"
-import { decision } from "./permissions.js"
+import { denied } from "./permissions.js"
 import { ReadTool } from "../vendor/opencode/read.js"
 import { WriteTool } from "../vendor/opencode/write.js"
 import { EditTool } from "../vendor/opencode/edit.js"
@@ -27,7 +26,7 @@ import { ApplyPatchTool } from "./apply-patch.js"
 console.log = console.error.bind(console)
 console.info = console.error.bind(console)
 console.debug = console.error.bind(console)
-const options = JSON.parse(process.argv[2]!) as { root: string; stateDir: string; ripgrep: string; permissions: PermissionConfig }
+const options = JSON.parse(process.argv[2]!) as { root: string; stateDir: string; ripgrep: string }
 const directory = await realpath(options.root)
 if (dirname(directory) === directory) throw new Error("Filesystem-root workspace is forbidden")
 const runId = randomUUID()
@@ -44,25 +43,13 @@ const send = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\
 const controllers = new Map<string, AbortController>()
 const tasks = new Set<Promise<void>>()
 const savedOutputs = new Set<string>()
-const approvals = new Map<string, { job: string; settle: (approved: boolean) => void }>()
 const allowed = new Set(["read", "edit", "glob", "grep", "bash", "webfetch", "todowrite", "external_directory"])
-function ask(job: string, input: Parameters<Tool.Context["ask"]>[0], controller: AbortController) {
+// No interactive approval: a requested capability either runs immediately or is
+// refused outright by the fixed deny list.
+function ask(input: Parameters<Tool.Context["ask"]>[0]) {
   if (!allowed.has(input.permission) || !input.patterns.length) return Effect.die(new Error("Unsupported permission: " + input.permission))
-  const decisions = input.patterns.map((pattern) => decision(input.permission, pattern, options.permissions))
-  if (decisions.includes("deny")) return Effect.die(new Error("Permission denied: " + input.permission))
-  if (!decisions.includes("ask")) return Effect.void
-  return Effect.promise((signal) => new Promise<void>((resolveApproval, rejectApproval) => {
-    const abortSignal = AbortSignal.any([signal, controller.signal])
-    const id = randomUUID()
-    const cleanup = () => { approvals.delete(id); abortSignal.removeEventListener("abort", abort) }
-    const abort = () => { cleanup(); rejectApproval(new Error("Permission request cancelled")) }
-    approvals.set(id, { job, settle: (approved) => {
-      cleanup(); if (approved) resolveApproval(); else rejectApproval(new Error("Permission rejected: " + input.permission))
-    } })
-    abortSignal.addEventListener("abort", abort, { once: true })
-    if (abortSignal.aborted) return abort()
-    send({ type: "permission", id: job, request: { id, permission: input.permission, patterns: input.patterns, metadata: input.metadata } })
-  }))
+  if (denied(input.permission)) return Effect.die(new Error("Permission denied: " + input.permission))
+  return Effect.void
 }
 async function execute(message: { id: string; tool: string; args: Record<string, unknown> }) {
   const controller = new AbortController()
@@ -83,7 +70,7 @@ async function execute(message: { id: string; tool: string; args: Record<string,
     const ctx: Tool.Context = {
       sessionID: runId, abort: controller.signal,
       metadata: (progress) => Effect.sync(() => { send({ type: "progress", id: message.id, progress }) }),
-      ask: (input) => ask(message.id, input, controller),
+      ask: (input) => ask(input),
     }
     const result = await runtime.runPromise(tool.execute(args, ctx).pipe(Effect.provideService(Invocation, {
       abort: controller.signal, root: directory, savedOutputs: message.tool === "read" ? savedOutputs : new Set(), guards,
@@ -98,7 +85,6 @@ async function execute(message: { id: string; tool: string; args: Record<string,
     send({ type: "error", id: message.id, error: error instanceof Error ? error.message : String(error) })
   } finally {
     controllers.delete(message.id)
-    for (const approval of [...approvals.values()]) if (approval.job === message.id) approval.settle(false)
   }
 }
 send({ type: "ready", protocol: 1, directory, tools: definitions.map((tool) => ({ name: tool.id, description: tool.description, inputSchema: ToolJsonSchema.fromTool(tool) })) })
@@ -114,10 +100,6 @@ try {
       if (typeof message.id !== "string" || controllers.has(message.id) || typeof message.tool !== "string" || !message.args || typeof message.args !== "object" || Array.isArray(message.args)) throw new Error("Invalid execution frame")
       const task = execute(message); tasks.add(task); void task.finally(() => tasks.delete(task))
     } else if (message.type === "cancel") controllers.get(message.id)?.abort()
-    else if (message.type === "reply") {
-      const approval = approvals.get(message.permission_id)
-      if (!approval || approval.job !== message.job_id || !["once", "reject"].includes(message.reply)) send({ type: "error", id: message.id, error: "No matching pending permission" })
-      else { approval.settle(message.reply === "once"); send({ type: "ack", id: message.id }) }
-    } else throw new Error("Unknown worker operation")
+    else throw new Error("Unknown worker operation")
   }
 } finally { stop(); await Promise.allSettled(tasks); await runtime.dispose() }

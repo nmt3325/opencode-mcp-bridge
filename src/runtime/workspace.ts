@@ -60,15 +60,16 @@ export const assertExternalDirectoryEffect = (ctx: Tool.Context, path: string, _
     }
   })
 
-// A permission can be answered minutes later. Refuse to commit a diff against
-// a different file, and recheck the canonical target after approval.
+// A tool call can still interleave with an external edit. Refuse to commit a
+// diff against a different file, and recheck the canonical target immediately
+// before the replacement.
 export async function verifyGuard(invocation: InvocationState, path: string): Promise<void> {
   invocation.abort.throwIfAborted()
   const target = await checkPath(invocation.root, path)
   if (target !== path || !invocation.guards.has(path)) throw new Error("File target changed; inspect it before retrying")
   const current = await fingerprint(path), expected = invocation.guards.get(path)
   if (current?.hash !== expected?.hash || current?.mode !== expected?.mode || (current === null) !== (expected === null)) {
-    throw new Error("File changed while awaiting permission; read it and retry explicitly")
+    throw new Error("File changed during execution; read it and retry explicitly")
   }
 }
 const writes = new Map<string, Promise<unknown>>()

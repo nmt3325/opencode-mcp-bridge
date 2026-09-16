@@ -30,7 +30,7 @@ try {
   const transport = new StdioClientTransport({
     command: process.execPath, args: [join(installed, "dist/index.js")], cwd: directory, stderr: "pipe",
     env: { PATH: blocked, OPENCODE_MCP_ROOT: root, OPENCODE_MCP_STATE_DIR: state,
-      OPENCODE_MCP_RG: rg, OPENCODE_MCP_PERMISSIONS: JSON.stringify({ edit: "allow", bash: "allow" }) },
+      OPENCODE_MCP_RG: rg },
   })
   let diagnostics = ""
   transport.stderr?.on("data", (chunk) => { diagnostics += chunk })

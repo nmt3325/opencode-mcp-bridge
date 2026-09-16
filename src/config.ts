@@ -2,7 +2,6 @@ import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { z } from "zod"
 
 export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 export const UPSTREAM = {
@@ -11,12 +10,9 @@ export const UPSTREAM = {
   commit: "16747470f976aca3d362ad730bcd3fe82ecc2c9a",
   distribution: "vendored-tools",
 } as const
-export const VERSION = "0.3.0"
+export const VERSION = "0.4.0"
 export const NATIVE_TOOL_IDS = ["read", "write", "edit", "glob", "grep", "bash", "webfetch", "todowrite", "apply_patch"] as const
 
-const action = z.enum(["allow", "ask", "deny"])
-const permissions = z.record(z.union([action, z.record(action)]))
-export type PermissionConfig = z.infer<typeof permissions>
 export interface BridgeConfig {
   root: string
   stateDir: string
@@ -28,7 +24,6 @@ export interface BridgeConfig {
   jobTimeoutMs: number
   maxJobs: number
   maxConcurrent: number
-  permissions: PermissionConfig
 }
 
 function integer(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -41,6 +36,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   for (const key of ["OPENCODE_BASE_URL", "OPENCODE_SERVER_PASSWORD", "OPENCODE_API_TOKEN", "OPENCODE_MCP_DEFAULT_MODEL", "OPENCODE_MCP_DEFAULT_AGENT", "OPENCODE_MCP_SHELL_BACKEND", "OPENCODE_MCP_RUNTIME_DIR", "OPENCODE_MCP_BUN"]) {
     if (env[key]) throw new Error(`${key} was removed: this bridge executes native tools only. See README migration instructions.`)
   }
+  if (env.OPENCODE_MCP_PERMISSIONS) {
+    throw new Error("OPENCODE_MCP_PERMISSIONS was removed: there is no pre-execution approval, so every tool call from an authenticated client runs immediately. See README migration instructions.")
+  }
   for (const key of ["OPENCODE_MCP_LSP", "OPENCODE_MCP_FORMATTER"]) {
     if (env[key] && !["false", "0"].includes(env[key]!)) throw new Error(`${key} was removed: application services are not included in the standalone toolbox`)
   }
@@ -49,7 +47,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const root = resolve(directory)
   if (dirname(root) === root) throw new Error("The filesystem root cannot be the toolbox workspace")
   const key = createHash("sha256").update(root).digest("hex").slice(0, 20)
-  const policy = env.OPENCODE_MCP_PERMISSIONS ? permissions.parse(JSON.parse(env.OPENCODE_MCP_PERMISSIONS)) : {}
   const maxJobs = integer(env, "OPENCODE_MCP_MAX_JOBS", 64, 8, 256)
   const maxConcurrent = integer(env, "OPENCODE_MCP_MAX_CONCURRENT", 8, 1, 32)
   if (maxConcurrent > maxJobs) throw new Error("OPENCODE_MCP_MAX_CONCURRENT must not exceed OPENCODE_MCP_MAX_JOBS")
@@ -63,7 +60,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     waitMs: integer(env, "OPENCODE_MCP_WAIT_MAX_SECONDS", 45, 0, 50) * 1000,
     jobTimeoutMs: integer(env, "OPENCODE_MCP_JOB_TIMEOUT_SECONDS", 600, 5, 3600) * 1000,
     maxJobs, maxConcurrent,
-    permissions: policy,
   }
 }
 

@@ -1,5 +1,5 @@
 // The parser and hunk matching are extracted unchanged from OpenCode core.
-// This adapter supplies workspace checks, approval and per-file atomic writes.
+// This adapter supplies workspace checks and per-file atomic writes.
 import { Effect, Schema } from "effect"
 import { readFile, unlink } from "node:fs/promises"
 import { relative } from "node:path"
@@ -11,7 +11,7 @@ import { Invocation, checkPath, checkedWrite, fingerprint, verifyGuard, withWrit
 const Parameters = Schema.Struct({ patchText: Schema.String.annotate({ description: "The patch to apply, using *** Begin Patch / *** End Patch with Add, Update, Delete and optional Move to hunks." }) })
 interface Change { source: string; target: string; kind: string; before: string; after?: string; diff: string }
 export const ApplyPatchTool = Tool.define("apply_patch", Effect.succeed({
-  description: "Apply an OpenCode patch to add, update, delete or move files. All paths and hunks are validated before requesting edit permission. Changes are atomic per file, not a multi-file transaction. Inspect progress after a cancellation or failure; never retry a partially applied patch blindly.",
+  description: "Apply an OpenCode patch to add, update, delete or move files. All paths and hunks are validated before any file is touched. Changes are atomic per file, not a multi-file transaction. Inspect progress after a cancellation or failure; never retry a partially applied patch blindly.",
   parameters: Parameters,
   execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => Effect.gen(function* () {
     const invocation = yield* Invocation
