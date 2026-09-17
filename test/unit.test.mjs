@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { loadConfig, workerEnvironment } from "../dist/config.js"
 import { OpencodeClient } from "../dist/opencodeClient.js"
-import { checkedWrite, fingerprint } from "../dist/runtime/workspace.js"
+import { checkPath, checkedWrite, fingerprint, reserve } from "../dist/runtime/workspace.js"
 import { parseArgs } from "../dist/index.js"
 
 // Unit tests inject IPC outcomes only, never substitute native tool algorithms.
@@ -81,7 +81,7 @@ test("a newly finished job is not immediately evicted behind active jobs", () =>
 })
 // Without an approval pause the conflict window is short, so the write guards
 // are exercised directly: they still refuse to overwrite someone else's edit.
-test("writes refuse changed content, mode swaps and parent symlink escapes", async () => {
+test("writes refuse changed content, mode swaps and swapped parent directories", async () => {
   const base = await realpath(await mkdtemp(join(tmpdir(), "toolbox-guard-")))
   const root = join(base, "workspace"), outside = join(base, "outside")
   await mkdir(root); await mkdir(outside)
@@ -106,9 +106,26 @@ test("writes refuse changed content, mode swaps and parent symlink escapes", asy
     const swapped = join(parent, "file.txt")
     const escape = await invocation(swapped)
     await rename(parent, parent + "-original"); await symlink(outside, parent)
-    await assert.rejects(checkedWrite(escape, swapped, "tool change"), /outside|denied|changed/i)
+    await assert.rejects(checkedWrite(escape, swapped, "tool change"), /changed/i)
     assert.equal(await exists(join(outside, "file.txt")), false)
   } finally { await rm(base, { recursive: true, force: true }) }
+})
+// The workspace root is a default, not a boundary: only the bridge's private
+// trees are withheld from the tools.
+test("tools reach outside the workspace root but not the bridge's private trees", async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), "toolbox-reserved-")))
+  const root = join(base, "workspace"), outside = join(base, "outside"), state = join(base, "state")
+  for (const directory of [root, outside, state]) await mkdir(directory)
+  try {
+    reserve([state])
+    const target = join(outside, "external.txt")
+    assert.equal(await checkPath(root, "../outside/external.txt"), target)
+    assert.equal(await checkPath(root, target), target)
+    await assert.rejects(checkPath(root, join(state, "runs", "job.json")), /private state|denied/i)
+    const invocation = { abort: new AbortController().signal, root, savedOutputs: new Set(), guards: new Map([[target, await fingerprint(target)]]) }
+    await checkedWrite(invocation, target, "written outside the root")
+    assert.equal(await readFile(target, "utf8"), "written outside the root")
+  } finally { reserve([]); await rm(base, { recursive: true, force: true }) }
 })
 
 test("standalone CLI rejects runtime and application-service options", () => {

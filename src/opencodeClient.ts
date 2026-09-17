@@ -132,7 +132,7 @@ export class OpencodeClient {
     return this.catalog
   }
   info(): Record<string, unknown> {
-    return { mode: "toolbox-only", implementation: "vendored-tools", runtime: "node", opencode_installation_required: false, llm_delegation: false, pre_execution_approval: false, ready: !!this.catalog.length && !this.fatal,
+    return { mode: "toolbox-only", implementation: "vendored-tools", runtime: "node", opencode_installation_required: false, llm_delegation: false, pre_execution_approval: false, workspace_confinement: false, ready: !!this.catalog.length && !this.fatal,
       upstream: UPSTREAM, directory: this.config.root, tools: this.catalog.map((tool) => tool.name) }
   }
   list(): JobView[] {

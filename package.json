@@ -1,6 +1,6 @@
 {
   "name": "opencode-mcp-bridge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Standalone MCP server with extracted OpenCode execution tools; no OpenCode installation, Bun, chat UI or model runtime",
   "license": "MIT",
   "type": "module",

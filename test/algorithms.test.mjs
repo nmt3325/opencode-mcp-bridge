@@ -3,7 +3,6 @@ import { test } from "node:test"
 import { replace } from "../dist/vendor/opencode/edit.js"
 import { Patch } from "../dist/vendor/opencode/patch.js"
 import { tail } from "../dist/vendor/opencode/shell-output.js"
-import { denied } from "../dist/runtime/permissions.js"
 
 test("extracted replacement is literal, supports fuzzy lines, and rejects ambiguity", () => {
   assert.equal(replace("a old z", "old", "$& $1"), "a $& $1 z")
@@ -25,9 +24,4 @@ test("extracted output tail never cuts through a UTF-8 character", () => {
     assert.ok(Buffer.byteLength(output.text) <= cap)
     assert.ok(!output.text.includes("\uFFFD"))
   }
-})
-
-test("delegation and filesystem-escape capabilities stay denied without an approval step", () => {
-  for (const permission of ["external_directory", "task", "question"]) assert.equal(denied(permission), true)
-  for (const permission of ["read", "write", "edit", "bash", "webfetch", "glob", "grep", "todowrite"]) assert.equal(denied(permission), false)
 })

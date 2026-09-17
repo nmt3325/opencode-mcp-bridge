@@ -17,6 +17,18 @@ export function within(root: string, path: string): boolean {
   const diff = relative(root, path)
   return diff === "" || (!isAbsolute(diff) && diff !== ".." && !diff.startsWith("../") && !diff.startsWith("..\\"))
 }
+// The workspace root is the base for relative paths and the default working
+// directory, not a jail: a call may target any path the OS account can reach.
+// The bridge's own private state and package trees are the exception, so a tool
+// cannot rewrite job bookkeeping, saved output or its own code.
+let reservedDirectories: readonly string[] = []
+export function reserve(paths: readonly string[]): void {
+  reservedDirectories = paths.map((path) => resolve(path))
+}
+export function isReserved(target: string): boolean {
+  return reservedDirectories.some((directory) => within(directory, target))
+}
+const RESERVED = "Path denied: target is inside the bridge's private state or package directory"
 export async function canonical(path: string): Promise<string> {
   let current = resolve(path)
   const tail: string[] = []
@@ -28,7 +40,7 @@ export async function canonical(path: string): Promise<string> {
         if (cause.code !== "ENOENT") throw cause
         return undefined
       })
-      if (info?.isSymbolicLink()) throw new Error("Dangling symlink is outside the supported workspace scope")
+      if (info?.isSymbolicLink()) throw new Error("Dangling symlink has no canonical target")
       const parent = dirname(current)
       if (parent === current) throw error
       tail.unshift(relative(parent, current)); current = parent
@@ -45,9 +57,9 @@ export async function fingerprint(path: string): Promise<Fingerprint> {
     throw error
   }
 }
-export async function checkPath(root: string, path: string): Promise<string> {
-  const target = await canonical(resolve(root, path))
-  if (!within(root, target)) throw new Error("Path denied: target is outside OPENCODE_MCP_ROOT")
+export async function checkPath(base: string, path: string): Promise<string> {
+  const target = await canonical(resolve(base, path))
+  if (isReserved(target)) throw new Error(RESERVED)
   return target
 }
 export const assertExternalDirectoryEffect = (ctx: Tool.Context, path: string, _options?: { bypass?: boolean; kind?: string }) =>
@@ -55,9 +67,7 @@ export const assertExternalDirectoryEffect = (ctx: Tool.Context, path: string, _
     const invocation = yield* Invocation
     ctx.abort.throwIfAborted()
     const target = yield* Effect.promise(() => canonical(path))
-    if (!within(invocation.root, target) && !invocation.savedOutputs.has(target)) {
-      throw new Error("Path denied: target is outside OPENCODE_MCP_ROOT")
-    }
+    if (isReserved(target) && !invocation.savedOutputs.has(target)) throw new Error(RESERVED)
   })
 
 // A tool call can still interleave with an external edit. Refuse to commit a

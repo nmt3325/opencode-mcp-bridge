@@ -107,6 +107,7 @@ test("native catalog and original schemas are exposed, delegation is absent", as
   const info = await call("opencode_native_info")
   assert.equal(info.llm_delegation, false)
   assert.equal(info.pre_execution_approval, false)
+  assert.equal(info.workspace_confinement, false)
   assert.equal(info.implementation, "vendored-tools")
   assert.equal(info.opencode_installation_required, false)
   assert.equal(info.runtime, "node")
@@ -173,20 +174,23 @@ test("TODO writes use small standalone JSON storage, not an OpenCode database", 
   assert.deepEqual(rows, todos)
 })
 
-test("workspace traversal, sibling prefixes, and symlink escapes are denied", async () => {
-  await writeFile(join(temporary, "outside.txt"), "do not disclose")
+test("paths outside the workspace root are reachable; private bridge directories are not", async () => {
+  await writeFile(join(temporary, "outside.txt"), "external content")
   await symlink(join(temporary, "outside.txt"), join(root, "escape.txt"))
   await mkdir(join(temporary, "workspace-sibling"))
   await writeFile(join(temporary, "workspace-sibling/secret.txt"), "sibling")
   for (const path of ["../outside.txt", "escape.txt", "../workspace-sibling/secret.txt"]) {
-    const job = await finish(await call("read", { filePath: path }))
-    assert.equal(job.status, "failed")
-    assert.match(job.error, /outside|denied/i)
-    assert.ok(!JSON.stringify(job).includes("do not disclose"))
+    const job = await complete("read", { filePath: path })
+    assert.match(job.result.output, /external content|sibling/)
   }
-  const job = await finish(await call("write", { filePath: "../outside.txt", content: "bad" }))
-  assert.equal(job.status, "failed")
-  assert.equal(await readFile(join(temporary, "outside.txt"), "utf8"), "do not disclose")
+  await complete("write", { filePath: "../outside.txt", content: "written from outside the root" })
+  assert.equal(await readFile(join(temporary, "outside.txt"), "utf8"), "written from outside the root")
+  const read = await finish(await call("read", { filePath: join(config.stateDir, "runs") }))
+  assert.equal(read.status, "failed")
+  assert.match(read.error, /denied/i)
+  const write = await finish(await call("write", { filePath: join(config.stateDir, "intrusion.txt"), content: "bad" }))
+  assert.equal(write.status, "failed")
+  assert.equal(await exists(join(config.stateDir, "intrusion.txt")), false)
 })
 
 test("permission controls are gone and concurrent writes both execute", async () => {
@@ -259,12 +263,13 @@ test("apply_patch adds, updates, moves and deletes real files", async () => {
   assert.equal(await exists(join(root, "patch/remove.txt")), false)
 })
 
-test("patch path escapes and bad later hunks fail before any writes", async () => {
-  for (const suffix of ["*** Add File: ../escape-patch.txt\n+bad", "*** Update File: seed.txt\n@@\n-not in file\n+bad"]) {
+test("patch targets inside private directories and bad later hunks fail before any writes", async () => {
+  for (const suffix of ["*** Add File: ../state/intrusion.txt\n+bad", "*** Update File: seed.txt\n@@\n-not in file\n+bad"]) {
     const job = await finish(await call("apply_patch", { patchText: `*** Begin Patch\n*** Add File: must-not-exist.txt\n+bad\n${suffix}\n*** End Patch` }))
     assert.equal(job.status, "failed", JSON.stringify(job))
     assert.equal(await exists(join(root, "must-not-exist.txt")), false)
   }
+  assert.equal(await exists(join(temporary, "state/intrusion.txt")), false)
 })
 
 test("patch refuses an existing add/move target and duplicate paths", async () => {

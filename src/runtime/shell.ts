@@ -14,7 +14,7 @@ import { preview, tail } from "../vendor/opencode/shell-output.js"
 import { MAX_BYTES, MAX_LINES } from "./output.js"
 const CAPTURE_LIMIT = 64 * 1024 * 1024
 export const ShellTool = Tool.define("bash", Effect.succeed({
-  description: "Execute a shell command in the workspace (bash on POSIX, cmd.exe on Windows). The timeout is in milliseconds (default 120000). Output is bounded and longer output is saved for read. Commands run immediately; there is no confirmation step. A running job is not completion; poll its job_id, never repeat it. This tool does not invoke an AI model.",
+  description: "Execute a shell command (bash on POSIX, cmd.exe on Windows). workdir defaults to the workspace root and may be any directory the OS account can reach. The timeout is in milliseconds (default 120000). Output is bounded and longer output is saved for read. Commands run immediately; there is no confirmation step. A running job is not completion; poll its job_id, never repeat it. This tool does not invoke an AI model.",
   parameters: Parameters,
   execute: (params: Parameters, ctx: Tool.Context) => Effect.gen(function* () {
     const workspace = yield* Workspace
